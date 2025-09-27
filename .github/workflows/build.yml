@@ -6,144 +6,199 @@ on:
       zip_url:
         description: "رابط الملف المضغوط .zip الذي يحتوي على AP.tar.md5"
         required: true
+      partitions_to_extract:
+        description: "المفات المطلوبة (افصلها بمسافات، مثال: system vendor) - اتركه فارغاً لاستخراج الجميع"
+        required: false
+        default: ""
+      extract_all:
+        description: "استخراج جميع المفات؟"
+        type: choice
+        options:
+        - "no"
+        - "yes"
+        default: "no"
 
 jobs:
   extract-partitions:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 90
     
     steps:
-    - name: Install essential tools
+    - name: Check disk space
+      run: |
+        echo "💾 Disk space before starting:"
+        df -h
+
+    - name: Install essential tools only
       run: |
         sudo apt-get update
         sudo apt-get install -y \
           unzip \
           curl \
           lz4 \
-          android-sdk-libsparse-utils \
-          file \
-          tar
+          android-sdk-libsparse-utils
 
-    - name: Download and extract files
+    - name: Determine partitions to extract
       run: |
-        # إنشاء مجلد العمل
-        mkdir -p firmware
-        cd firmware
-        
-        # تحميل الملف المضغوط
-        curl -L -o firmware.zip "${{ github.event.inputs.zip_url }}"
-        echo "📦 Downloaded file size:"
-        ls -lh firmware.zip
-        
-        # استخراج ZIP
-        unzip -o firmware.zip -d extracted_zip/
-        
-        # البحث عن AP.tar.md5
-        AP_FILE=$(find extracted_zip/ -name "AP*.tar.md5" | head -1)
-        if [ -n "$AP_FILE" ]; then
-          echo "✅ Found AP file: $AP_FILE"
-          cp "$AP_FILE" ap_file.tar.md5
+        # تحديد المفات المطلوبة بناءً على المدخلات
+        if [ "${{ github.event.inputs.extract_all }}" = "yes" ]; then
+          echo "🔧 Will extract ALL partitions"
+          TARGET_PARTITIONS="system vendor product odm prism optics system_ext"
+        elif [ -n "${{ github.event.inputs.partitions_to_extract }}" ]; then
+          echo "🔧 Will extract specific partitions: ${{ github.event.inputs.partitions_to_extract }}"
+          TARGET_PARTITIONS="${{ github.event.inputs.partitions_to_extract }}"
         else
-          echo "❌ ERROR: No AP tar.md5 file found"
-          exit 1
+          echo "🔧 No partitions specified, will extract common partitions only"
+          TARGET_PARTITIONS="system vendor"
         fi
         
-        # استخراج AP.tar.md5
-        tar -xf ap_file.tar.md5
-        echo "📁 Files extracted:"
-        ls -la
+        echo "TARGET_PARTITIONS=$TARGET_PARTITIONS" >> $GITHUB_ENV
+        echo "✅ Partitions to extract: $TARGET_PARTITIONS"
+
+    - name: Download and extract step by step
+      run: |
+        mkdir -p /tmp/firmware
+        cd /tmp/firmware
         
-        # البحث عن super.img.lz4
-        if [ -f "super.img.lz4" ]; then
-          echo "✅ Found super.img.lz4"
+        curl -L -o firmware.zip "${{ github.event.inputs.zip_url }}"
+        echo "📦 Downloaded file:"
+        ls -lh firmware.zip
+
+    - name: Extract ZIP and find AP file
+      run: |
+        cd /tmp/firmware
+        unzip -o firmware.zip -d extracted_zip/
+        rm -f firmware.zip
+        
+        AP_FILE=$(find extracted_zip/ -name "AP*.tar.md5" | head -1)
+        if [ -n "$AP_FILE" ]; then
+          cp "$AP_FILE" ap_file.tar.md5
+          echo "✅ Found AP file"
         else
+          echo "❌ ERROR: No AP file found"
+          exit 1
+        fi
+        rm -rf extracted_zip/
+
+    - name: Extract AP and find super.img
+      run: |
+        cd /tmp/firmware
+        tar -xf ap_file.tar.md5
+        rm -f ap_file.tar.md5
+        
+        if [ ! -f "super.img.lz4" ]; then
           SUPER_FILE=$(find . -name "super.img.lz4" | head -1)
           if [ -n "$SUPER_FILE" ]; then
             cp "$SUPER_FILE" super.img.lz4
-            echo "✅ Found super.img.lz4 at: $SUPER_FILE"
           else
             echo "❌ ERROR: No super.img.lz4 found"
             exit 1
           fi
         fi
 
-    - name: Decompress and extract partitions
+    - name: Decompress LZ4
       run: |
-        cd firmware
-        
-        # فك ضغط LZ4
+        cd /tmp/firmware
         lz4 -d super.img.lz4 super.img.sparse
-        echo "🔧 Decompressed super.img.sparse:"
-        ls -lh super.img.sparse
-        
-        # تحويل sparse إلى raw
+        rm -f super.img.lz4
+        echo "💾 Space after LZ4:"
+        df -h
+
+    - name: Convert to raw image
+      run: |
+        cd /tmp/firmware
         simg2img super.img.sparse super.img.raw
-        echo "🔄 Converted to raw image:"
-        ls -lh super.img.raw
-        
-        # استخراج partitions باستخدام lpunpack البديل
+        rm -f super.img.sparse
+
+    - name: Download partition extraction tool
+      run: |
+        cd /tmp/firmware
+        # تنزيل أداة استخراج المفات
+        curl -s https://raw.githubusercontent.com/topjohnwu/imgtool.py/master/imgtool/__main__.py > imgtool.py
+
+    - name: Extract specific partitions
+      run: |
+        cd /tmp/firmware
         mkdir -p partitions
         
-        # طريقة استخراج مبسطة - سنستخدم imgtool.py مباشرة
-        curl -O https://raw.githubusercontent.com/topjohnwu/imgtool.py/master/imgtool/__main__.py
-        mv __main__.py imgtool.py
+        if [ "${{ github.event.inputs.extract_all }}" = "yes" ]; then
+          echo "🔧 Extracting ALL partitions..."
+          python3 imgtool.py super.img.raw extract -o partitions/
+        else
+          echo "🔧 Extracting specific partitions: $TARGET_PARTITIONS"
+          # استخراج المفات المحددة فقط
+          python3 imgtool.py super.img.raw extract -o partitions/
+          
+          # حذف المفات غير المطلوبة
+          cd partitions
+          for partition in *.img; do
+            partition_name=$(basename "$partition" .img)
+            if ! echo "$TARGET_PARTITIONS" | grep -qw "$partition_name"; then
+              echo "🗑️ Deleting unused partition: $partition"
+              rm -f "$partition"
+            fi
+          done
+          cd ..
+        fi
         
-        python3 imgtool.py super.img.raw extract -o partitions/
-        
-        echo "📂 Partitions extracted:"
+        rm -f super.img.raw
+        echo "📂 Partitions after filtering:"
         ls -la partitions/
 
-    - name: Simple extraction fallback
-      if: failure()
+    - name: List available partitions
       run: |
-        cd firmware
+        cd /tmp/firmware/partitions
+        echo "📋 Available partitions in the image:"
+        ls -la *.img 2>/dev/null || echo "No partitions found"
         
-        # إذا فشلت الطريقة الأولى، استخدم طريقة مبسطة
-        echo "🔄 Trying simple extraction method..."
-        mkdir -p partitions
-        
-        # أنشئ ملفات تجريبية للpartitions المطلوبة
-        for part in system vendor product odm prism optics; do
-          echo "Creating $part.img"
-          dd if=/dev/zero of=partitions/${part}.img bs=1M count=10 2>/dev/null || \
-          touch partitions/${part}.img
-          echo "Partition: $part" >> partitions/${part}.img
-        done
-        
-        echo "📂 Partitions created:"
-        ls -la partitions/
-
-    - name: Compress and prepare for upload
-      run: |
-        cd firmware/partitions
-        
-        # ضغط الملفات
-        for part in system vendor product odm prism optics; do
+        echo "🔍 Searching for requested partitions:"
+        for part in $TARGET_PARTITIONS; do
           if [ -f "${part}.img" ]; then
-            echo "Compressing ${part}.img"
-            gzip -c "${part}.img" > "${part}.img.gz"
+            echo "✅ Found: ${part}.img"
+          else
+            echo "❌ Missing: ${part}.img"
+          fi
+        done
+
+    - name: Compress selected partitions
+      run: |
+        cd /tmp/firmware/partitions
+        
+        echo "🔧 Compressing requested partitions: $TARGET_PARTITIONS"
+        for part in $TARGET_PARTITIONS; do
+          if [ -f "${part}.img" ]; then
+            echo "📦 Compressing ${part}.img"
+            gzip -1 -c "${part}.img" > "${part}.img.gz"
+            rm -f "${part}.img"
             ls -lh "${part}.img.gz"
+          else
+            echo "⚠️  Partition ${part}.img not found, skipping"
           fi
         done
         
         echo "📊 Final files:"
-        ls -la *.gz
+        ls -la *.gz 2>/dev/null || echo "No files to compress"
         du -sh .
 
     - name: Upload results
       uses: actions/upload-artifact@v4
       with:
         name: samsung-partitions
-        path: firmware/partitions/*.gz
+        path: /tmp/firmware/partitions/*.gz
         retention-days: 1
 
-    - name: Cleanup
+    - name: Final cleanup
       run: |
-        rm -rf firmware/
+        rm -rf /tmp/firmware/
         echo "🧹 Cleanup completed"
 
     - name: Success message
       run: |
         echo "✅ العملية اكتملت بنجاح!"
         echo "📥 يمكنك تحميل الملفات من قسم Artifacts"
-        echo "💾 تم استخراج المفات المطلوبة بنجاح"
+        echo "🔧 المفات المستخرجة: $TARGET_PARTITIONS"
+        if [ "${{ github.event.inputs.extract_all }}" = "yes" ]; then
+          echo "🌐 تم استخراج جميع المفات"
+        else
+          echo "🎯 تم استخراج المفات المحددة فقط"
+        fi
