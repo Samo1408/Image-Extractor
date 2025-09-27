@@ -1,0 +1,84 @@
+name: Extract Samsung Super.img Partitions
+
+on:
+  workflow_dispatch:
+    inputs:
+      ap_url:
+        description: "https://mde1.androidfilehost.com/dl/4G22l9pb8yI1LM636YEHlw/1759067744/4279422670115711601/M127GXXU3BVG2_M127GODM3BVG2_NPB.zip"
+        required: true
+      target_partitions:
+        description: "vendor"
+        required: false
+        default: "vendor"
+
+jobs:
+  extract-partitions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    
+    steps:
+    - name: Install essential tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          p7zip-full \
+          curl \
+          lz4 \
+          android-sdk-libsparse-utils \
+          simg2img
+
+    - name: Create working directory
+      run: |
+        mkdir -p firmware/extracted
+
+    - name: Download AP file (resumable)
+      run: |
+        cd firmware
+        curl -L -C - -o ap_file.zip "${{ github.event.inputs.ap_url }}"
+        ls -lh ap_file.zip
+
+    - name: Extract super.img.lz4 from AP archive
+      run: |
+        cd firmware
+        7z x ap_file.zip -oextracted/ "super.img.lz4" -r
+        ls -la extracted/
+
+    - name: Decompress LZ4 and convert to raw image
+      run: |
+        cd firmware/extracted
+        lz4 -d super.img.lz4 super.img.sparse
+        simg2img super.img.sparse super.img.raw
+        ls -lh *.img*
+
+    - name: Extract partitions using lpunpack
+      run: |
+        cd firmware/extracted
+        mkdir -p partitions
+        lpunpack super.img.raw partitions/
+        ls -la partitions/
+
+    - name: Filter and compress only needed partitions
+      run: |
+        cd firmware/extracted/partitions
+        for part in ${{ github.event.inputs.target_partitions }}; do
+          if [ -f "${part}.img" ]; then
+            echo "Compressing ${part}.img"
+            gzip -c "${part}.img" > "${part}.img.gz"
+            ls -lh "${part}.img.gz"
+          fi
+        done
+
+    - name: Upload compressed partitions
+      uses: actions/upload-artifact@v4
+      with:
+        name: samsung-partitions
+        path: |
+          firmware/extracted/partitions/*.img.gz
+        retention-days: 1
+        compression-level: 0  # لأن الملفات مضغوطة مسبقاً
+
+    - name: Cleanup to save space
+      run: |
+        rm -rf firmware/extracted/super.img.*
+        rm -rf firmware/ap_file.zip
+        du -sh firmware/
