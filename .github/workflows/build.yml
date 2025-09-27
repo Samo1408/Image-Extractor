@@ -26,249 +26,112 @@ jobs:
           lz4 \
           android-sdk-libsparse-utils \
           file \
-          tar \
-          python3 \
-          python3-pip
-
-    - name: Install imgtool.py for partition extraction
-      run: |
-        pip3 install imgtool.py
+          tar
 
     - name: Create working directory
       run: |
         mkdir -p firmware/extracted
 
-    - name: Download ZIP file (resumable)
+    - name: Download ZIP file
       run: |
         cd firmware
-        curl -L -C - -o firmware.zip "${{ github.event.inputs.zip_url }}"
+        curl -L -o firmware.zip "${{ github.event.inputs.zip_url }}"
         ls -lh firmware.zip
 
     - name: Extract ZIP and find AP.tar.md5
       run: |
         cd firmware
-        
-        # استخراج الملف المضغوط
         unzip -o firmware.zip -d extracted_zip/
         
-        echo "=== Searching for AP.tar.md5 files ==="
-        find extracted_zip/ -name "AP*.tar.md5" -o -name "*.tar.md5" | head -5
-        
-        # انسخ أول ملف AP.tar.md5 وجد
         AP_FILE=$(find extracted_zip/ -name "AP*.tar.md5" | head -1)
         if [ -n "$AP_FILE" ]; then
-          echo "Found AP file: $AP_FILE"
           cp "$AP_FILE" ap_file.tar.md5
+          echo "Found AP file: $AP_FILE"
         else
-          echo "=== Trying to find any tar.md5 file ==="
-          TAR_FILE=$(find extracted_zip/ -name "*.tar.md5" | head -1)
-          if [ -n "$TAR_FILE" ]; then
-            echo "Found tar.md5 file: $TAR_FILE"
-            cp "$TAR_FILE" ap_file.tar.md5
-          else
-            echo "ERROR: No tar.md5 file found!"
-            echo "=== All files in ZIP ==="
-            find extracted_zip/ -type f | head -20
-            exit 1
-          fi
+          echo "ERROR: No AP tar.md5 file found"
+          exit 1
         fi
-        
         ls -lh ap_file.tar.md5
 
     - name: Delete original ZIP to free space
       run: |
         cd firmware
-        echo "🗑️ Deleting original ZIP file to free up space..."
         rm -f firmware.zip
-        echo "✅ ZIP file deleted"
+        echo "ZIP file deleted"
         du -sh .
 
-    - name: Extract AP.tar.md5 and prepare super.img
+    - name: Extract AP.tar.md5
       run: |
         cd firmware
-        
-        # استخرج محتويات AP.tar.md5
         tar -xf ap_file.tar.md5 -C extracted/
-        
-        echo "=== Files in AP.tar.md5 ==="
+        echo "Files in AP.tar.md5:"
         ls -la extracted/
-        
-        # تأكد من وجود super.img.lz4
-        if [ -f "extracted/super.img.lz4" ]; then
-          echo "✅ Found super.img.lz4 directly"
-        else
-          SUPER_LZ4=$(find extracted/ -name "super.img.lz4" | head -1)
-          if [ -n "$SUPER_LZ4" ]; then
-            echo "✅ Found super.img.lz4 at: $SUPER_LZ4"
-          else
-            echo "ERROR: No super.img.lz4 found!"
-            echo "=== All files in tar.md5 ==="
-            find extracted/ -type f | head -20
-            exit 1
-          fi
-        fi
 
-    - name: Delete AP.tar.md5 to free more space
+    - name: Delete AP.tar.md5 to free space
       run: |
         cd firmware
-        echo "🗑️ Deleting AP.tar.md5 file to free up space..."
         rm -f ap_file.tar.md5
-        echo "✅ AP.tar.md5 file deleted"
+        echo "AP.tar.md5 file deleted"
         du -sh .
 
     - name: Decompress super.img.lz4
       run: |
         cd firmware/extracted
-        
-        echo "Decompressing super.img.lz4..."
-        lz4 -d super.img.lz4 super.img.sparse
-        
-        ls -lh super.img.sparse
+        lz4 -d super.img.lz4 super.img
+        ls -lh super.img
 
     - name: Delete super.img.lz4 after extraction
       run: |
         cd firmware/extracted
-        echo "🗑️ Deleting super.img.lz4 to free up space..."
         rm -f super.img.lz4
-        echo "✅ super.img.lz4 deleted"
+        echo "super.img.lz4 deleted"
         du -sh .
 
-    - name: Convert sparse to raw
+    - name: Install imgtool for partition extraction
       run: |
-        cd firmware/extracted
-        
-        echo "Converting sparse image to raw..."
-        simg2img super.img.sparse super.img.raw
-        ls -lh super.img.raw
+        sudo apt-get install -y python3-pip
+        pip3 install git+https://github.com/topjohnwu/imgtool.py
 
-    - name: Extract partitions using imgtool.py
+    - name: Extract partitions using imgtool
       run: |
         cd firmware/extracted
-        
-        echo "Extracting partitions using imgtool.py..."
         mkdir -p partitions
-        
-        # استخدم imgtool.py لاستخراج partitions
-        python3 -m imgtool super.img.raw extract --output-dir ./partitions/
-        
+        python3 -m imgtool super.img extract -o partitions/
         echo "Partitions extracted:"
         ls -la partitions/
 
-    - name: Alternative extraction method (if imgtool fails)
-      if: failure()
+    - name: Delete super.img after extraction
       run: |
         cd firmware/extracted
-        
-        echo "Trying alternative extraction method..."
-        mkdir -p partitions
-        
-        # طريقة بديلة باستخدام imgtool.py مباشرة
-        img2simg super.img.raw super.img.sparse_test 2>/dev/null || true
-        img2simg --help || true
-        
-        # حاول استخدام imgtool بطرق مختلفة
-        python3 -c "
-import sys
-sys.path.append('/usr/local/lib/python3.8/dist-packages')
-try:
-    from imgtool import main as imgtool
-    sys.argv = ['imgtool', 'super.img.raw', 'extract', './partitions/']
-    imgtool()
-except Exception as e:
-    print(f'Error: {e}')
-    # طريقة يدوية باستخدام Python
-    import os
-    os.system('ls -la > partitions/file_list.txt')
-"
-        
-        ls -la partitions/
-
-    - name: Manual extraction using Python script
-      if: failure()
-      run: |
-        cd firmware/extracted
-        
-        echo "Using manual Python extraction..."
-        mkdir -p partitions
-        
-        # إنشاء سكريبت Python بسيط لاستخراج partitions
-        cat > extract_partitions.py << 'EOF'
-import os
-import struct
-import sys
-
-def extract_partitions(image_path, output_dir):
-    print(f"Reading image: {image_path}")
-    
-    with open(image_path, 'rb') as f:
-        # اقرأ رأس super partition
-        header = f.read(4096)
-        
-        # ابحث عن إشارات partitions
-        partitions = []
-        for part in ['system', 'vendor', 'product', 'odm', 'prism', 'optics']:
-            f.seek(0)
-            content = f.read(1000000)  # اقرأ جزء من الملف
-            if part.encode() in content:
-                partitions.append(part)
-                print(f"Found partition: {part}")
-        
-        print(f"Detected partitions: {partitions}")
-        
-        # أنشئ ملفات dummy للاختبار
-        for part in partitions:
-            dummy_file = os.path.join(output_dir, f"{part}.img")
-            with open(dummy_file, 'w') as out:
-                out.write(f"This is a dummy {part} partition file")
-            print(f"Created: {dummy_file}")
-
-if __name__ == "__main__":
-    extract_partitions('super.img.raw', './partitions')
-EOF
-        
-        python3 extract_partitions.py
-        ls -la partitions/
-
-    - name: Delete super.img files after partition extraction
-      run: |
-        cd firmware/extracted
-        echo "🗑️ Deleting super.img files to free up space..."
-        rm -f super.img.sparse super.img.raw
-        echo "✅ super.img files deleted"
+        rm -f super.img
+        echo "super.img deleted"
         du -sh .
 
-    - name: Filter and compress needed partitions
+    - name: Compress needed partitions
       run: |
         cd firmware/extracted/partitions
-        
-        echo "Target partitions: ${{ github.event.inputs.target_partitions }}"
-        
         for part in ${{ github.event.inputs.target_partitions }}; do
           if [ -f "${part}.img" ]; then
             echo "Compressing ${part}.img"
             gzip -c "${part}.img" > "${part}.img.gz"
             ls -lh "${part}.img.gz"
           else
-            echo "Partition ${part}.img not found (skipping)"
+            echo "Partition ${part}.img not found"
           fi
         done
 
-    - name: Delete original .img files after compression
+    - name: Delete original partition files
       run: |
         cd firmware/extracted/partitions
-        echo "🗑️ Deleting original .img files to free up space..."
         rm -f *.img
-        echo "✅ Original .img files deleted"
+        echo "Original partition files deleted"
         du -sh .
 
     - name: List final results
       run: |
         cd firmware/extracted/partitions
-        
-        echo "=== Compressed .img.gz files ==="
-        ls -la *.img.gz 2>/dev/null || echo "No .img.gz files found"
-        
-        echo "=== Total size ==="
+        echo "Compressed files:"
+        ls -la *.img.gz
         du -sh .
 
     - name: Upload compressed partitions
@@ -277,16 +140,13 @@ EOF
         name: samsung-partitions
         path: firmware/extracted/partitions/*.img.gz
         retention-days: 1
-        compression-level: 0
 
     - name: Final cleanup
       run: |
-        rm -rf firmware/extracted_zip/
-        rm -rf firmware/extracted/
-        echo "✅ Final cleanup completed"
+        rm -rf firmware/
+        echo "Final cleanup completed"
 
     - name: Success message
       run: |
         echo "✅ العملية اكتملت بنجاح!"
         echo "📥 يمكنك تحميل الملفات من قسم Artifacts"
-        echo "💾 تم حذف جميع الملفات المؤقتة لتوفير المساحة"
