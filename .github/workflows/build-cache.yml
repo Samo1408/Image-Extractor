@@ -1,4 +1,4 @@
-name: Extract Samsung Super.img Partitions
+name: Extract Samsung Partitions with Boot/Recovery Option
 
 on:
   workflow_dispatch:
@@ -6,25 +6,59 @@ on:
       zip_url:
         description: "رابط الملف المضغوط .zip الذي يحتوي على AP.tar.md5"
         required: true
+      extraction_mode:
+        description: "نوع الاستخراج"
+        type: choice
+        options:
+        - "partitions"
+        - "boot"
+        - "recovery"
+        default: "partitions"
       partitions_to_extract:
-        description: "المفات المطلوبة (افصلها بمسافات، مثال: system vendor)"
+        description: "المفات المطلوبة (للوضع partitions فقط)"
         required: false
         default: "system vendor"
       release_tag:
-        description: "وسم الإصدار (مثال: v1.0.0)"
+        description: "وسم الإصدار"
         required: true
         default: "v1.0.0"
 
+permissions:
+  contents: write
+
 jobs:
-  extract-partitions:
+  extract-files:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     
     steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+      
     - name: Check initial disk space
       run: |
         echo "💾 Initial disk space:"
         df -h
+
+    - name: Generate unique tag
+      run: |
+        git fetch --tags
+        INPUT_TAG="${{ github.event.inputs.release_tag }}"
+        CLEAN_TAG=$(echo "$INPUT_TAG" | tr ' ' '-' | tr -cd '[:alnum:]-._')
+        
+        if git rev-parse "$CLEAN_TAG" >/dev/null 2>&1; then
+          echo "⚠️ Tag $CLEAN_TAG exists, generating unique tag..."
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          FINAL_TAG="${CLEAN_TAG}-${TIMESTAMP}"
+        else
+          FINAL_TAG="$CLEAN_TAG"
+        fi
+        
+        echo "FINAL_TAG=$FINAL_TAG" >> $GITHUB_ENV
+        echo "EXTRACTION_MODE=${{ github.event.inputs.extraction_mode }}" >> $GITHUB_ENV
+        echo "🎯 Mode: ${{ github.event.inputs.extraction_mode }}, Tag: $FINAL_TAG"
 
     - name: Install essential tools
       run: |
@@ -38,64 +72,134 @@ jobs:
 
     - name: Download lpunpack.py
       run: |
-        cd /tmp
         curl -s -O https://raw.githubusercontent.com/Samo1408/Image-Extractor/main/lpunpack.py
         echo "✅ lpunpack.py downloaded"
 
-    - name: Set partition names and artifact name
-      run: |
-        if [ -n "${{ github.event.inputs.partitions_to_extract }}" ]; then
-          TARGET_PARTITIONS="${{ github.event.inputs.partitions_to_extract }}"
-          ARTIFACT_NAME=$(echo "$TARGET_PARTITIONS" | tr ' ' '-' | cut -c1-50)
-        else
-          TARGET_PARTITIONS="system vendor"
-          ARTIFACT_NAME="system-vendor"
-        fi
-        
-        CLEAN_TAG=$(echo "${{ github.event.inputs.release_tag }}" | tr ' ' '-' | tr -cd '[:alnum:]-._')
-        
-        echo "TARGET_PARTITIONS=$TARGET_PARTITIONS" >> $GITHUB_ENV
-        echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
-        echo "RELEASE_TAG=$CLEAN_TAG" >> $GITHUB_ENV
-        
-        echo "✅ Partitions to extract: $TARGET_PARTITIONS"
-        echo "📁 Artifact name: $ARTIFACT_NAME"
-
     - name: Download and extract firmware
       run: |
-        mkdir -p /tmp/firmware
-        cd /tmp/firmware
+        mkdir -p firmware
+        cd firmware
         curl -L -o firmware.zip "${{ github.event.inputs.zip_url }}"
         echo "📦 Downloaded file"
         ls -lh firmware.zip
 
-    - name: Extract ZIP and process AP file
+    - name: Extract ZIP and find files
       run: |
-        cd /tmp/firmware
+        cd firmware
         unzip -o firmware.zip -d extracted_zip/
         rm -f firmware.zip
         
+        echo "📁 Files in ZIP:"
+        find extracted_zip/ -type f -name "*.tar.md5" | head -10
+        
+        # البحث عن ملف AP
         AP_FILE=$(find extracted_zip/ -name "AP*.tar.md5" | head -1)
         if [ -n "$AP_FILE" ]; then
           cp "$AP_FILE" ap_file.tar.md5
-          echo "✅ Found AP file"
+          echo "✅ Found AP file: $AP_FILE"
         else
           echo "❌ ERROR: No AP file found"
           exit 1
         fi
-        rm -rf extracted_zip/
+        
+        # البحث عن ملفات boot و recovery مباشرة في ZIP
+        BOOT_FILE=$(find extracted_zip/ -name "boot.img*" | head -1)
+        RECOVERY_FILE=$(find extracted_zip/ -name "recovery.img*" | head -1)
+        
+        if [ -n "$BOOT_FILE" ]; then
+          echo "✅ Found boot file: $BOOT_FILE"
+          echo "BOOT_FILE=$BOOT_FILE" >> $GITHUB_ENV
+        fi
+        
+        if [ -n "$RECOVERY_FILE" ]; then
+          echo "✅ Found recovery file: $RECOVERY_FILE"
+          echo "RECOVERY_FILE=$RECOVERY_FILE" >> $GITHUB_ENV
+        fi
 
-    - name: Extract AP and handle super.img
+    - name: Extract AP and prepare files based on mode
       run: |
-        cd /tmp/firmware
+        cd firmware
+        
+        # استخراج AP.tar.md5
         tar -xf ap_file.tar.md5
         rm -f ap_file.tar.md5
         
-        if [ -f "super.img.lz4" ]; then
-          echo "✅ super.img.lz4 is ready"
+        echo "📁 Files in AP.tar.md5:"
+        ls -la | grep -E "(boot|recovery|super)\\.img" || ls -la | head -15
+
+    - name: Handle boot.img extraction mode
+      if: env.EXTRACTION_MODE == 'boot'
+      run: |
+        cd firmware
+        
+        # البحث عن boot.img
+        if [ -f "boot.img.lz4" ]; then
+          echo "✅ Found boot.img.lz4 directly"
+          BOOT_SOURCE="boot.img.lz4"
         else
-          SUPER_FILE=$(find . -type f -name "super.img.lz4" | head -1)
-          if [ -n "$SUPER_FILE" ] && [ "$SUPER_FILE" != "./super.img.lz4" ]; then
+          BOOT_SOURCE=$(find . -name "boot.img.lz4" -o -name "boot.img" | head -1)
+          if [ -n "$BOOT_SOURCE" ]; then
+            echo "✅ Found boot source: $BOOT_SOURCE"
+          else
+            echo "❌ ERROR: No boot.img found"
+            exit 1
+          fi
+        fi
+        
+        # فك ضغط إذا كان مضغوطاً
+        if [[ "$BOOT_SOURCE" == *.lz4 ]]; then
+          echo "🔓 Decompressing boot.img.lz4..."
+          lz4 -d "$BOOT_SOURCE" boot.img
+          echo "✅ boot.img ready"
+        else
+          cp "$BOOT_SOURCE" boot.img
+        fi
+        
+        ls -lh boot.img
+        echo "BOOT_FINAL=boot.img" >> $GITHUB_ENV
+
+    - name: Handle recovery.img extraction mode
+      if: env.EXTRACTION_MODE == 'recovery'
+      run: |
+        cd firmware
+        
+        # البحث عن recovery.img
+        if [ -f "recovery.img.lz4" ]; then
+          echo "✅ Found recovery.img.lz4 directly"
+          RECOVERY_SOURCE="recovery.img.lz4"
+        else
+          RECOVERY_SOURCE=$(find . -name "recovery.img.lz4" -o -name "recovery.img" | head -1)
+          if [ -n "$RECOVERY_SOURCE" ]; then
+            echo "✅ Found recovery source: $RECOVERY_SOURCE"
+          else
+            echo "❌ ERROR: No recovery.img found"
+            exit 1
+          fi
+        fi
+        
+        # فك ضغط إذا كان مضغوطاً
+        if [[ "$RECOVERY_SOURCE" == *.lz4 ]]; then
+          echo "🔓 Decompressing recovery.img.lz4..."
+          lz4 -d "$RECOVERY_SOURCE" recovery.img
+          echo "✅ recovery.img ready"
+        else
+          cp "$RECOVERY_SOURCE" recovery.img
+        fi
+        
+        ls -lh recovery.img
+        echo "RECOVERY_FINAL=recovery.img" >> $GITHUB_ENV
+
+    - name: Handle partitions extraction mode
+      if: env.EXTRACTION_MODE == 'partitions'
+      run: |
+        cd firmware
+        
+        # البحث عن super.img.lz4
+        if [ -f "super.img.lz4" ]; then
+          echo "✅ Found super.img.lz4 directly"
+        else
+          SUPER_FILE=$(find . -name "super.img.lz4" | head -1)
+          if [ -n "$SUPER_FILE" ]; then
             cp "$SUPER_FILE" super.img.lz4
             echo "✅ Found and copied super.img.lz4"
           else
@@ -103,28 +207,29 @@ jobs:
             exit 1
           fi
         fi
-
-    - name: Decompress and convert super.img
-      run: |
-        cd /tmp/firmware
+        
+        # فك ضغط وتحويل super.img
         lz4 -d super.img.lz4 super.img.sparse
         rm -f super.img.lz4
         simg2img super.img.sparse super.img.raw
         rm -f super.img.sparse
         echo "✅ super.img.raw ready"
 
-    - name: Extract partitions using lpunpack
+    - name: Extract partitions from super.img
+      if: env.EXTRACTION_MODE == 'partitions'
       run: |
-        cd /tmp/firmware
+        cd firmware
         mkdir -p partitions
-        python3 /tmp/lpunpack.py super.img.raw partitions/
+        python3 ../lpunpack.py super.img.raw partitions/
         echo "📂 Partitions extracted:"
         ls -la partitions/
 
     - name: Filter requested partitions
+      if: env.EXTRACTION_MODE == 'partitions'
       run: |
-        cd /tmp/firmware/partitions
+        cd firmware/partitions
         
+        TARGET_PARTITIONS="${{ github.event.inputs.partitions_to_extract }}"
         echo "🔧 Filtering partitions. Keeping only: $TARGET_PARTITIONS"
         
         for partition in *.img; do
@@ -136,112 +241,129 @@ jobs:
             rm -f "$partition"
           fi
         done
-        
-        echo "📂 Remaining partitions:"
-        ls -la *.img 2>/dev/null || echo "No partitions found"
 
-    - name: Compress partitions and verify
+    - name: Compress files based on mode
       run: |
-        cd /tmp/firmware/partitions
+        cd firmware
+        mkdir -p output
         
-        echo "🔧 Compressing partitions..."
-        COMPRESSED_FILES=""
-        for part in $TARGET_PARTITIONS; do
-          if [ -f "${part}.img" ]; then
-            echo "📦 Compressing ${part}.img"
-            gzip -1 -c "${part}.img" > "${part}.img.gz"
-            rm -f "${part}.img"
-            ls -lh "${part}.img.gz"
-            COMPRESSED_FILES="${COMPRESSED_FILES} ${part}.img.gz"
-          else
-            echo "⚠️ ${part}.img not found"
-          fi
-        done
+        case "$EXTRACTION_MODE" in
+          "boot")
+            echo "📦 Handling boot mode..."
+            cp boot.img output/
+            gzip output/boot.img
+            echo "BOOT_FINAL=output/boot.img.gz" >> $GITHUB_ENV
+            ARTIFACT_NAME="boot"
+            ;;
+          "recovery")
+            echo "📦 Handling recovery mode..."
+            cp recovery.img output/
+            gzip output/recovery.img
+            echo "RECOVERY_FINAL=output/recovery.img.gz" >> $GITHUB_ENV
+            ARTIFACT_NAME="recovery"
+            ;;
+          "partitions")
+            echo "📦 Handling partitions mode..."
+            cd partitions
+            TARGET_PARTITIONS="${{ github.event.inputs.partitions_to_extract }}"
+            for part in $TARGET_PARTITIONS; do
+              if [ -f "${part}.img" ]; then
+                echo "📦 Compressing ${part}.img"
+                gzip -c "${part}.img" > "../output/${part}.img.gz"
+                ls -lh "../output/${part}.img.gz"
+              fi
+            done
+            ARTIFACT_NAME=$(echo "$TARGET_PARTITIONS" | tr ' ' '-' | cut -c1-50)
+            ;;
+        esac
         
-        # حفظ قائمة الملفات المضغوطة
-        echo "COMPRESSED_FILES=$COMPRESSED_FILES" >> $GITHUB_ENV
-        echo "📊 Compressed files:$COMPRESSED_FILES"
+        echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
+        echo "📁 Output files:"
+        ls -la output/
 
-    - name: Create final release package with exact path
+    - name: Create final package
       run: |
-        cd /tmp/firmware/partitions
+        cd firmware/output
         
-        # إنشاء مسار دقيق للملف النهائي
-        FINAL_FILE="/tmp/$ARTIFACT_NAME-$RELEASE_TAG.tar.gz"
+        FINAL_FILE="/tmp/$ARTIFACT_NAME-$FINAL_TAG.tar.gz"
         
-        # التحقق من وجود ملفات للضغط
-        if ls *.gz 1> /dev/null 2>&1; then
+        if ls * 1> /dev/null 2>&1; then
           echo "📦 Creating final package: $FINAL_FILE"
-          tar -czf "$FINAL_FILE" ./*.gz
+          tar -czf "$FINAL_FILE" ./*
           echo "✅ Package created successfully"
           ls -lh "$FINAL_FILE"
-          
-          # حفظ المسار الدقيق
           echo "FINAL_FILE=$FINAL_FILE" >> $GITHUB_ENV
         else
           echo "❌ No files to package"
-          echo "📁 Current directory contents:"
-          ls -la
           exit 1
         fi
 
-    - name: Verify final file exists
+    - name: Create GitHub Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ env.FINAL_TAG }}
+        release_name: "${{ env.EXTRACTION_MODE }} ${{ env.ARTIFACT_NAME }} - ${{ env.FINAL_TAG }}"
+        body: |
+          # ${{ env.EXTRACTION_MODE }} Extraction - ${{ env.FINAL_TAG }}
+          
+          ## 🔧 معلومات الإصدار:
+          - **النوع:** ${{ env.EXTRACTION_MODE }}
+          - **الملفات:** ${{ env.ARTIFACT_NAME }}
+          - **الوسم:** ${{ env.FINAL_TAG }}
+          - **التاريخ:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          ## 📋 محتويات الحزمة:
+          ${{ env.ARTIFACT_NAME }}
+          
+          ## ⚡ طريقة الاستخدام:
+          \`\`\`bash
+          tar -xzf ${{ env.ARTIFACT_NAME }}-${{ env.FINAL_TAG }}.tar.gz
+          \`\`\`
+        draft: false
+        prerelease: false
+
+    - name: Upload to Release
       run: |
-        if [ -f "$FINAL_FILE" ]; then
-          echo "✅ Final file exists: $FINAL_FILE"
-          echo "📊 File size: $(ls -lh $FINAL_FILE | awk '{print $5}')"
-        else
-          echo "❌ Final file not found: $FINAL_FILE"
-          echo "📁 /tmp contents:"
-          ls -la /tmp/*.tar.gz 2>/dev/null || echo "No tar.gz files in /tmp"
+        UPLOAD_URL="${{ steps.create_release.outputs.upload_url }}"
+        UPLOAD_URL=$(echo "$UPLOAD_URL" | sed 's/{.*}//')
+        
+        if [ ! -f "$FINAL_FILE" ]; then
+          echo "❌ File not found: $FINAL_FILE"
           exit 1
         fi
+        
+        echo "📤 Uploading: $FINAL_FILE"
+        curl -X POST \
+          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          -H "Content-Type: application/gzip" \
+          -H "Accept: application/vnd.github.v3+json" \
+          -T "$FINAL_FILE" \
+          "$UPLOAD_URL?name=$ARTIFACT_NAME-$FINAL_TAG.tar.gz"
+        
+        echo "✅ تم الرفع بنجاح!"
 
-    - name: Upload to Artifacts (Primary)
+    - name: Upload to Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ env.ARTIFACT_NAME }}-${{ env.RELEASE_TAG }}
+        name: ${{ env.EXTRACTION_MODE }}-${{ env.ARTIFACT_NAME }}-${{ env.FINAL_TAG }}
         path: ${{ env.FINAL_FILE }}
         retention-days: 7
 
-    - name: Create GitHub Release (Optional)
-      if: success()
+    - name: Cleanup
       run: |
-        echo "📦 Creating GitHub Release..."
-        echo "🔧 If this fails, check repository permissions"
-        
-        # تحميل إلى Releases باستخدام curl بديل
-        UPLOAD_URL="https://uploads.github.com/repos/$GITHUB_REPOSITORY/releases"
-        RELEASE_DATA='{"tag_name":"'"$RELEASE_TAG"'","name":"Partitions '"$ARTIFACT_NAME"' - '"$RELEASE_TAG"'","body":"Partitions Extracted: '"$TARGET_PARTITIONS"'"}'
-        
-        # محاولة إنشاء release
-        response=$(curl -s -X POST \
-          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-          -H "Content-Type: application/json" \
-          -d "$RELEASE_DATA" \
-          "https://api.github.com/repos/$GITHUB_REPOSITORY/releases" || echo "Release creation failed")
-        
-        echo "📋 Release creation response: $response"
-        
-        # إذا فشل، نكتفي بالـArtifacts
-        if [[ "$response" == *"failed"* ]] || [[ "$response" == *"error"* ]]; then
-          echo "⚠️ Release creation failed. Using Artifacts only."
-          echo "💡 To enable Releases, ensure the repository has write permissions."
-        else
-          echo "✅ Release created successfully"
-        fi
-
-    - name: Final cleanup
-      run: |
-        rm -rf /tmp/firmware
-        rm -f /tmp/lpunpack.py
+        rm -rf firmware
+        rm -f lpunpack.py
         rm -f /tmp/*.tar.gz
-        echo "🧹 Cleanup completed"
+        echo "🧹 تم التنظيف"
 
     - name: Success message
       run: |
-        echo "✅ العملية اكتملت بنجاح!"
-        echo "📥 تم رفع الملفات إلى Artifacts: $ARTIFACT_NAME-$RELEASE_TAG"
-        echo "🔧 المفات المستخرجة: $TARGET_PARTITIONS"
-        echo "💡 يمكنك تحميل الملفات من تبويب Actions → Artifacts"
-        echo "🏷️ وسْم الإصدار: $RELEASE_TAG"
+        echo "🎉 العملية اكتملت بنجاح!"
+        echo "🚀 النوع: $EXTRACTION_MODE"
+        echo "📁 الملفات: $ARTIFACT_NAME"
+        echo "🏷️ الوسم: $FINAL_TAG"
+        echo "📎 الرابط: https://github.com/$GITHUB_REPOSITORY/releases/tag/$FINAL_TAG"
+        echo "⏰ الوقت المحفوظ: مباشر بدون super.img extraction"
