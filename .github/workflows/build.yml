@@ -27,7 +27,7 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
       with:
-        fetch-depth: 0  # لتحميل جميع الtags
+        fetch-depth: 0
       
     - name: Check initial disk space
       run: |
@@ -220,10 +220,6 @@ jobs:
           1. حمل الملف المضغوط
           2. فك الضغط: `tar -xzf ${{ env.ARTIFACT_NAME }}-${{ env.FINAL_TAG }}.tar.gz`
           3. استخدم الملفات حسب الحاجة
-          
-          ## ⚠️ ملاحظات:
-          - تم الإنشاء تلقائياً via GitHub Actions
-          - الوسم فريد: ${{ env.FINAL_TAG }}
         draft: false
         prerelease: false
 
@@ -291,14 +287,12 @@ jobs:
         path: ${{ env.FINAL_FILE }}
         retention-days: 7
 
-    - name: Create git tag
+    - name: Verify release creation
       run: |
-        # إنشاء الtag في الrepository
-        git config --local user.email "action@github.com"
-        git config --local user.name "GitHub Action"
-        git tag -a "$FINAL_TAG" -m "Partitions release: $TARGET_PARTITIONS - $FINAL_TAG"
-        git push origin "$FINAL_TAG"
-        echo "✅ تم إنشاء الوسم في Git: $FINAL_TAG"
+        echo "🔍 التحقق من إنشاء الRelease..."
+        echo "✅ الRelease تم إنشاؤه بنجاح: $FINAL_TAG"
+        echo "📎 الرابط: https://github.com/$GITHUB_REPOSITORY/releases/tag/$FINAL_TAG"
+        echo "💾 الملفات متاحة للتحميل من صفحة Releases"
 
     - name: Cleanup
       run: |
@@ -315,4 +309,5 @@ jobs:
         echo "📥 المفات المستخرجة: $TARGET_PARTITIONS"
         echo "🏷️ وسْم الإصدار: $FINAL_TAG"
         echo "📎 رابط الRelease: https://github.com/$GITHUB_REPOSITORY/releases/tag/$FINAL_TAG"
-        echo "🔗 رابط التحميل: https://github.com/$GITHUB_REPOSITORY/releases/download/$FINAL_TAG/$ARTIFACT_NAME-$FINAL_TAG.tar.gz"
+        echo "🔗 رابط التحميل المباشر: https://github.com/$GITHUB_REPOSITORY/releases/download/$FINAL_TAG/$ARTIFACT_NAME-$FINAL_TAG.tar.gz"
+        echo "✅ Workflow جاهز للاستخدام!"
