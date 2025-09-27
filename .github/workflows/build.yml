@@ -17,6 +17,10 @@ on:
         - "no"
         - "yes"
         default: "no"
+      release_tag:
+        description: "وسم الإصدار (مثال: v1.0.0)"
+        required: true
+        default: "v1.0.0"
 
 jobs:
   extract-partitions:
@@ -41,35 +45,37 @@ jobs:
           python3 \
           python3-pip
 
-    - name: Download lpunpack.py from the new repository
+    - name: Download lpunpack.py
       run: |
         cd /tmp
-        # تحميل الملف مباشرة من المستودع الجديد
         curl -s -O https://raw.githubusercontent.com/Samo1408/Image-Extractor/main/lpunpack.py
         chmod +x lpunpack.py
-        echo "✅ lpunpack.py downloaded successfully"
-        
-        # اختبار أن الملف يعمل
-        python3 -c "import argparse, enum, dataclasses, pathlib, typing; print('✅ All required modules are available')"
-        
-        # اختبار تشغيل lpunpack
-        python3 lpunpack.py --help || python3 lpunpack.py -h || echo "lpunpack ready to use"
+        echo "✅ lpunpack.py downloaded"
 
-    - name: Determine partitions to extract
+    - name: Determine partitions to extract and set names
       run: |
         if [ "${{ github.event.inputs.extract_all }}" = "yes" ]; then
           echo "🔧 Will extract ALL partitions"
           TARGET_PARTITIONS="system vendor product odm prism optics system_ext"
+          ARTIFACT_NAME="all-partitions"
         elif [ -n "${{ github.event.inputs.partitions_to_extract }}" ]; then
           echo "🔧 Will extract specific partitions: ${{ github.event.inputs.partitions_to_extract }}"
           TARGET_PARTITIONS="${{ github.event.inputs.partitions_to_extract }}"
+          # إنشاء اسم ذكي بناءً على المفات المطلوبة
+          ARTIFACT_NAME=$(echo "$TARGET_PARTITIONS" | tr ' ' '-' | tr -d '\n')
         else
           echo "🔧 Using default partitions: system vendor"
           TARGET_PARTITIONS="system vendor"
+          ARTIFACT_NAME="system-vendor"
         fi
         
         echo "TARGET_PARTITIONS=$TARGET_PARTITIONS" >> $GITHUB_ENV
+        echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
+        echo "RELEASE_TAG=${{ github.event.inputs.release_tag }}" >> $GITHUB_ENV
+        
         echo "✅ Partitions to extract: $TARGET_PARTITIONS"
+        echo "📁 Artifact name: $ARTIFACT_NAME"
+        echo "🏷️ Release tag: ${{ github.event.inputs.release_tag }}"
 
     - name: Download and extract firmware
       run: |
@@ -120,7 +126,6 @@ jobs:
         simg2img super.img.sparse super.img.raw
         rm -f super.img.sparse
         echo "✅ super.img.raw ready"
-        ls -lh super.img.raw
 
     - name: Extract partitions using lpunpack
       run: |
@@ -132,8 +137,6 @@ jobs:
         
         echo "📂 Partitions extracted:"
         ls -la partitions/
-        echo "📋 List of partitions:"
-        ls -1 partitions/ | head -15
 
     - name: Filter requested partitions
       run: |
@@ -141,11 +144,6 @@ jobs:
         
         echo "🔧 Filtering partitions. Keeping only: $TARGET_PARTITIONS"
         
-        # عرض جميع المفات المتاحة أولاً
-        echo "📋 Available partitions:"
-        ls -la *.img 2>/dev/null | head -10 || echo "No .img files found"
-        
-        # فلترة المفات
         for partition in *.img; do
           partition_name=$(basename "$partition" .img)
           if echo "$TARGET_PARTITIONS" | grep -qw "$partition_name"; then
@@ -155,72 +153,73 @@ jobs:
             rm -f "$partition"
           fi
         done
-        
-        echo "📂 Partitions after filtering:"
-        ls -la *.img 2>/dev/null || echo "No partitions remaining after filtering"
 
-    - name: Verify requested partitions exist
+    - name: Compress and prepare for release
       run: |
         cd /tmp/firmware/partitions
         
-        echo "🔍 Verifying requested partitions:"
-        FOUND_COUNT=0
-        for part in $TARGET_PARTITIONS; do
-          if [ -f "${part}.img" ]; then
-            SIZE=$(ls -lh "${part}.img" | awk '{print $5}')
-            echo "✅ Found: ${part}.img ($SIZE)"
-            FOUND_COUNT=$((FOUND_COUNT + 1))
-          else
-            echo "❌ Missing: ${part}.img"
-          fi
-        done
-        
-        if [ $FOUND_COUNT -eq 0 ]; then
-          echo "⚠️  No requested partitions were found!"
-          echo "📋 All available files:"
-          ls -la
-        else
-          echo "📊 Found $FOUND_COUNT out of $(echo $TARGET_PARTITIONS | wc -w) requested partitions"
-        fi
-
-    - name: Cleanup super image
-      run: |
-        cd /tmp/firmware
-        rm -f super.img.raw
-        echo "💾 Space after cleanup:"
-        df -h
-
-    - name: Compress selected partitions
-      run: |
-        cd /tmp/firmware/partitions
-        
-        echo "🔧 Compressing requested partitions: $TARGET_PARTITIONS"
-        COMPRESSED_COUNT=0
+        echo "🔧 Compressing partitions..."
         for part in $TARGET_PARTITIONS; do
           if [ -f "${part}.img" ]; then
             echo "📦 Compressing ${part}.img"
             gzip -1 -c "${part}.img" > "${part}.img.gz"
             rm -f "${part}.img"
-            ls -lh "${part}.img.gz"
-            COMPRESSED_COUNT=$((COMPRESSED_COUNT + 1))
           fi
         done
         
-        if [ $COMPRESSED_COUNT -eq 0 ]; then
-          echo "⚠️  No partitions were compressed"
-        else
-          echo "✅ Successfully compressed $COMPRESSED_COUNT partitions"
-          echo "📊 Total size of compressed files:"
-          du -sh .
-        fi
+        # إنشاء ملف README للتوثيق
+        cat > README.txt << EOF
+Partitions Extractor - GitHub Actions
+=====================================
+Extracted Partitions: $TARGET_PARTITIONS
+Release Tag: $RELEASE_TAG
+Artifact Name: $ARTIFACT_NAME
 
-    - name: Upload results
+Partitions Details:
+$(for part in $TARGET_PARTITIONS; do
+  if [ -f "${part}.img.gz" ]; then
+    SIZE=$(ls -lh "${part}.img.gz" | awk '{print $5}')
+    echo "- ${part}.img.gz ($SIZE)"
+  fi
+done)
+
+Generated by GitHub Actions
+EOF
+
+        # إنرشيف نهائي للرفع على Releases
+        tar -czf "../$ARTIFACT_NAME-$RELEASE_TAG.tar.gz" .
+        
+        echo "📊 Final release package:"
+        ls -lh "/tmp/firmware/$ARTIFACT_NAME-$RELEASE_TAG.tar.gz"
+
+    - name: Cleanup
+      run: |
+        cd /tmp/firmware
+        rm -f super.img.raw
+        rm -rf partitions/
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ env.RELEASE_TAG }}
+        name: "Partitions ${{ env.ARTIFACT_NAME }} - ${{ env.RELEASE_TAG }}"
+        body: |
+          Partitions Extracted: ${{ env.TARGET_PARTITIONS }}
+          
+          Contains the following partitions:
+          ${{ env.TARGET_PARTITIONS }}
+          
+          Generated automatically by GitHub Actions.
+        files: /tmp/firmware/$ARTIFACT_NAME-$RELEASE_TAG.tar.gz
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Upload to Artifacts (as backup)
       uses: actions/upload-artifact@v4
       with:
-        name: samsung-partitions
-        path: /tmp/firmware/partitions/*.gz
+        name: ${{ env.ARTIFACT_NAME }}-${{ env.RELEASE_TAG }}
+        path: /tmp/firmware/$ARTIFACT_NAME-$RELEASE_TAG.tar.gz
         retention-days: 1
-        if-no-files-found: warn
 
     - name: Final cleanup
       run: |
@@ -231,6 +230,7 @@ jobs:
     - name: Success message
       run: |
         echo "✅ العملية اكتملت بنجاح!"
-        echo "📥 يمكنك تحميل الملفات من قسم Artifacts"
-        echo "🔧 المفات المطلوبة: $TARGET_PARTITIONS"
-        echo "🛠️ تم استخدام lpunpack.py من المستودع: Samo1408/Image-Extractor"
+        echo "🚀 تم الرفع على Releases: $ARTIFACT_NAME-$RELEASE_TAG"
+        echo "📥 المفات المستخرجة: $TARGET_PARTITIONS"
+        echo "🏷️ وسْم الإصدار: $RELEASE_TAG"
+        echo "📦 اسم الحزمة: $ARTIFACT_NAME-$RELEASE_TAG.tar.gz"
