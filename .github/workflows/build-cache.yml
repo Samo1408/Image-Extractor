@@ -1,4 +1,4 @@
-name: Extract Samsung Super.img Partitions
+name: Extract Samsung Super.img Partitions With Cache
 
 on:
   workflow_dispatch:
