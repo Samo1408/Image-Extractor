@@ -7,9 +7,9 @@ on:
         description: "رابط الملف المضغوط .zip الذي يحتوي على AP.tar.md5"
         required: true
       partitions_to_extract:
-        description: "المفات المطلوبة (افصلها بمسافات، مثال: system vendor) - اتركه فارغاً لاستخراج الجميع"
+        description: "المفات المطلوبة (افصلها بمسافات، مثال: system vendor)"
         required: false
-        default: ""
+        default: "system vendor"
       extract_all:
         description: "استخراج جميع المفات؟"
         type: choice
@@ -40,7 +40,6 @@ jobs:
 
     - name: Determine partitions to extract
       run: |
-        # تحديد المفات المطلوبة بناءً على المدخلات
         if [ "${{ github.event.inputs.extract_all }}" = "yes" ]; then
           echo "🔧 Will extract ALL partitions"
           TARGET_PARTITIONS="system vendor product odm prism optics system_ext"
@@ -48,7 +47,7 @@ jobs:
           echo "🔧 Will extract specific partitions: ${{ github.event.inputs.partitions_to_extract }}"
           TARGET_PARTITIONS="${{ github.event.inputs.partitions_to_extract }}"
         else
-          echo "🔧 No partitions specified, will extract common partitions only"
+          echo "🔧 Using default partitions: system vendor"
           TARGET_PARTITIONS="system vendor"
         fi
         
@@ -101,8 +100,6 @@ jobs:
         cd /tmp/firmware
         lz4 -d super.img.lz4 super.img.sparse
         rm -f super.img.lz4
-        echo "💾 Space after LZ4:"
-        df -h
 
     - name: Convert to raw image
       run: |
@@ -110,75 +107,97 @@ jobs:
         simg2img super.img.sparse super.img.raw
         rm -f super.img.sparse
 
-    - name: Download partition extraction tool
+    - name: Download reliable extraction tool
       run: |
         cd /tmp/firmware
-        # تنزيل أداة استخراج المفات
-        curl -s https://raw.githubusercontent.com/topjohnwu/imgtool.py/master/imgtool/__main__.py > imgtool.py
+        # تنزيل أداة موثوقة لاستخراج المفات
+        curl -s -O https://raw.githubusercontent.com/anestisb/android-simg2img/master/simg2img.py
+        curl -s -O https://raw.githubusercontent.com/anestisb/android-simg2img/master/lpunpack.py
+        chmod +x lpunpack.py
 
-    - name: Extract specific partitions
+    - name: Extract partitions using lpunpack
       run: |
         cd /tmp/firmware
         mkdir -p partitions
         
-        if [ "${{ github.event.inputs.extract_all }}" = "yes" ]; then
-          echo "🔧 Extracting ALL partitions..."
-          python3 imgtool.py super.img.raw extract -o partitions/
-        else
-          echo "🔧 Extracting specific partitions: $TARGET_PARTITIONS"
-          # استخراج المفات المحددة فقط
-          python3 imgtool.py super.img.raw extract -o partitions/
-          
-          # حذف المفات غير المطلوبة
-          cd partitions
-          for partition in *.img; do
-            partition_name=$(basename "$partition" .img)
-            if ! echo "$TARGET_PARTITIONS" | grep -qw "$partition_name"; then
-              echo "🗑️ Deleting unused partition: $partition"
-              rm -f "$partition"
-            fi
-          done
-          cd ..
-        fi
+        echo "🔧 Extracting partitions using lpunpack..."
+        python3 lpunpack.py super.img.raw partitions/
         
-        rm -f super.img.raw
-        echo "📂 Partitions after filtering:"
+        echo "📂 All partitions found:"
         ls -la partitions/
 
-    - name: List available partitions
+    - name: Filter requested partitions only
       run: |
         cd /tmp/firmware/partitions
-        echo "📋 Available partitions in the image:"
-        ls -la *.img 2>/dev/null || echo "No partitions found"
         
-        echo "🔍 Searching for requested partitions:"
+        echo "🔧 Filtering partitions. Keeping only: $TARGET_PARTITIONS"
+        
+        # حفظ المفات المطلوبة وحذف البقية
+        for partition in *.img; do
+          partition_name=$(basename "$partition" .img)
+          if echo "$TARGET_PARTITIONS" | grep -qw "$partition_name"; then
+            echo "✅ Keeping: $partition"
+          else
+            echo "🗑️ Deleting: $partition"
+            rm -f "$partition"
+          fi
+        done
+        
+        echo "📂 Partitions after filtering:"
+        ls -la *.img 2>/dev/null || echo "No partitions found after filtering"
+
+    - name: Verify requested partitions exist
+      run: |
+        cd /tmp/firmware/partitions
+        
+        echo "🔍 Verifying requested partitions:"
+        ALL_FOUND=true
         for part in $TARGET_PARTITIONS; do
           if [ -f "${part}.img" ]; then
             echo "✅ Found: ${part}.img"
+            ls -lh "${part}.img"
           else
             echo "❌ Missing: ${part}.img"
+            ALL_FOUND=false
           fi
         done
+        
+        if [ "$ALL_FOUND" = "false" ]; then
+          echo "⚠️  Some requested partitions were not found"
+          echo "📋 Available partitions:"
+          ls -la *.img 2>/dev/null || echo "No partitions available"
+        fi
+
+    - name: Cleanup super image
+      run: |
+        cd /tmp/firmware
+        rm -f super.img.raw
+        echo "💾 Space after cleanup:"
+        df -h
 
     - name: Compress selected partitions
       run: |
         cd /tmp/firmware/partitions
         
         echo "🔧 Compressing requested partitions: $TARGET_PARTITIONS"
+        COMPRESSED_COUNT=0
         for part in $TARGET_PARTITIONS; do
           if [ -f "${part}.img" ]; then
             echo "📦 Compressing ${part}.img"
             gzip -1 -c "${part}.img" > "${part}.img.gz"
             rm -f "${part}.img"
             ls -lh "${part}.img.gz"
-          else
-            echo "⚠️  Partition ${part}.img not found, skipping"
+            COMPRESSED_COUNT=$((COMPRESSED_COUNT + 1))
           fi
         done
         
-        echo "📊 Final files:"
-        ls -la *.gz 2>/dev/null || echo "No files to compress"
-        du -sh .
+        if [ $COMPRESSED_COUNT -eq 0 ]; then
+          echo "⚠️  No requested partitions were found to compress"
+          echo "📋 Available files:"
+          ls -la
+        else
+          echo "✅ Successfully compressed $COMPRESSED_COUNT partitions"
+        fi
 
     - name: Upload results
       uses: actions/upload-artifact@v4
@@ -186,6 +205,7 @@ jobs:
         name: samsung-partitions
         path: /tmp/firmware/partitions/*.gz
         retention-days: 1
+        if-no-files-found: warn
 
     - name: Final cleanup
       run: |
@@ -196,9 +216,4 @@ jobs:
       run: |
         echo "✅ العملية اكتملت بنجاح!"
         echo "📥 يمكنك تحميل الملفات من قسم Artifacts"
-        echo "🔧 المفات المستخرجة: $TARGET_PARTITIONS"
-        if [ "${{ github.event.inputs.extract_all }}" = "yes" ]; then
-          echo "🌐 تم استخراج جميع المفات"
-        else
-          echo "🎯 تم استخراج المفات المحددة فقط"
-        fi
+        echo "🔧 المفات المطلوبة: $TARGET_PARTITIONS"
