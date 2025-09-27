@@ -1,0 +1,256 @@
+name: Extract Samsung Super.img Partitions
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: "رابط الملف المضغوط .zip الذي يحتوي على AP.tar.md5"
+        required: true
+      partitions_to_extract:
+        description: "المفات المطلوبة (افصلها بمسافات، مثال: system vendor)"
+        required: false
+        default: "system vendor"
+      release_tag:
+        description: "وسم الإصدار (مثال: v1.0.0)"
+        required: true
+        default: "v1.0.0"
+
+jobs:
+  extract-partitions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    
+    steps:
+    - name: Check initial disk space
+      run: |
+        echo "💾 Initial disk space:"
+        df -h
+        echo "📊 Home directory:"
+        du -sh /home/runner/* | sort -hr
+
+    - name: Setup cache disk
+      run: |
+        # إنشاء مجلد cache مخصص على مسار سريع
+        sudo mkdir -p /mnt/cache
+        sudo chown runner:runner /mnt/cache
+        
+        # إذا كان هناك مساحة إضافية، استخدمها كcache
+        if [ -d "/mnt" ]; then
+          CACHE_DIR="/mnt/cache"
+          echo "✅ Using /mnt/cache for high-speed storage"
+        else
+          CACHE_DIR="/home/runner/cache"
+          mkdir -p $CACHE_DIR
+          echo "✅ Using home directory cache"
+        fi
+        
+        echo "CACHE_DIR=$CACHE_DIR" >> $GITHUB_ENV
+        echo "💾 Cache directory: $CACHE_DIR"
+        df -h $CACHE_DIR || df -h
+
+    - name: Install essential tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          unzip \
+          curl \
+          lz4 \
+          android-sdk-libsparse-utils \
+          python3 \
+          rsync
+
+    - name: Download lpunpack.py to cache
+      run: |
+        cd $CACHE_DIR
+        curl -s -O https://raw.githubusercontent.com/Samo1408/Image-Extractor/main/lpunpack.py
+        echo "✅ lpunpack.py downloaded to cache"
+
+    - name: Set partition names and artifact name
+      run: |
+        if [ -n "${{ github.event.inputs.partitions_to_extract }}" ]; then
+          TARGET_PARTITIONS="${{ github.event.inputs.partitions_to_extract }}"
+          ARTIFACT_NAME=$(echo "$TARGET_PARTITIONS" | tr ' ' '-' | cut -c1-50)
+        else
+          TARGET_PARTITIONS="system vendor"
+          ARTIFACT_NAME="system-vendor"
+        fi
+        
+        echo "TARGET_PARTITIONS=$TARGET_PARTITIONS" >> $GITHUB_ENV
+        echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
+        echo "RELEASE_TAG=${{ github.event.inputs.release_tag }}" >> $GITHUB_ENV
+        
+        echo "✅ Partitions to extract: $TARGET_PARTITIONS"
+        echo "📁 Artifact name: $ARTIFACT_NAME"
+
+    - name: Download firmware to cache
+      run: |
+        cd $CACHE_DIR
+        mkdir -p firmware
+        cd firmware
+        
+        echo "⬇️ Downloading firmware to cache..."
+        curl -L -o firmware.zip "${{ github.event.inputs.zip_url }}"
+        echo "📦 Downloaded file size:"
+        ls -lh firmware.zip
+        echo "💾 Cache space after download:"
+        df -h $CACHE_DIR
+
+    - name: Extract ZIP and process AP file with cache optimization
+      run: |
+        cd $CACHE_DIR/firmware
+        
+        echo "📁 Extracting ZIP to cache..."
+        unzip -o firmware.zip -d extracted_zip/
+        rm -f firmware.zip
+        
+        echo "💾 Space after ZIP extraction:"
+        df -h $CACHE_DIR
+        
+        AP_FILE=$(find extracted_zip/ -name "AP*.tar.md5" | head -1)
+        if [ -n "$AP_FILE" ]; then
+          cp "$AP_FILE" ap_file.tar.md5
+          echo "✅ Found AP file"
+        else
+          echo "❌ ERROR: No AP file found"
+          exit 1
+        fi
+        rm -rf extracted_zip/
+
+    - name: Extract AP and prepare super.img with cache
+      run: |
+        cd $CACHE_DIR/firmware
+        
+        echo "📁 Extracting AP.tar.md5 from cache..."
+        tar -xf ap_file.tar.md5
+        rm -f ap_file.tar.md5
+        
+        echo "💾 Space after AP extraction:"
+        df -h $CACHE_DIR
+        
+        SUPER_FILE=$(find . -name "super.img.lz4" | head -1)
+        if [ -n "$SUPER_FILE" ]; then
+          cp "$SUPER_FILE" super.img.lz4
+          echo "✅ Found super.img.lz4"
+        else
+          echo "❌ ERROR: No super.img.lz4 found"
+          exit 1
+        fi
+
+    - name: Decompress and convert super.img with cache speed
+      run: |
+        cd $CACHE_DIR/firmware
+        
+        echo "🔧 Decompressing LZ4 using cache..."
+        lz4 -d super.img.lz4 super.img.sparse
+        rm -f super.img.lz4
+        
+        echo "💾 Space after LZ4 decompression:"
+        df -h $CACHE_DIR
+        
+        echo "🔄 Converting sparse to raw..."
+        simg2img super.img.sparse super.img.raw
+        rm -f super.img.sparse
+        
+        echo "✅ super.img.raw ready in cache"
+
+    - name: Extract partitions using lpunpack from cache
+      run: |
+        cd $CACHE_DIR/firmware
+        mkdir -p partitions
+        
+        echo "🔧 Extracting partitions from cache..."
+        python3 $CACHE_DIR/lpunpack.py super.img.raw partitions/
+        
+        echo "📂 Partitions extracted:"
+        ls -la partitions/
+        echo "💾 Space after partition extraction:"
+        df -h $CACHE_DIR
+
+    - name: Filter requested partitions
+      run: |
+        cd $CACHE_DIR/firmware/partitions
+        
+        echo "🔧 Filtering partitions. Keeping only: $TARGET_PARTITIONS"
+        
+        for partition in *.img; do
+          partition_name=$(basename "$partition" .img)
+          if echo "$TARGET_PARTITIONS" | grep -qw "$partition_name"; then
+            echo "✅ Keeping: $partition"
+          else
+            echo "🗑️ Deleting: $partition"
+            rm -f "$partition"
+          fi
+        done
+
+    - name: Compress partitions with cache optimization
+      run: |
+        cd $CACHE_DIR/firmware/partitions
+        
+        echo "🔧 Compressing partitions in cache..."
+        for part in $TARGET_PARTITIONS; do
+          if [ -f "${part}.img" ]; then
+            echo "📦 Compressing ${part}.img"
+            gzip -1 -c "${part}.img" > "${part}.img.gz"
+            rm -f "${part}.img"
+            ls -lh "${part}.img.gz"
+          fi
+        done
+        
+        echo "💾 Final cache space:"
+        df -h $CACHE_DIR
+
+    - name: Create final release package from cache
+      run: |
+        cd $CACHE_DIR/firmware/partitions
+        
+        # إنشاء الأرشيف النهائي من cache
+        tar -czf "$CACHE_DIR/$ARTIFACT_NAME-$RELEASE_TAG.tar.gz" ./*.gz
+        
+        echo "📊 Final release package size:"
+        ls -lh "$CACHE_DIR/$ARTIFACT_NAME-$RELEASE_TAG.tar.gz"
+
+    - name: Create GitHub Release from cache
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ env.RELEASE_TAG }}
+        name: "Partitions ${{ env.ARTIFACT_NAME }} - ${{ env.RELEASE_TAG }}"
+        body: |
+          Partitions Extracted: ${{ env.TARGET_PARTITIONS }}
+          
+          Generated automatically by GitHub Actions with cache optimization.
+        files: $CACHE_DIR/$ARTIFACT_NAME-$RELEASE_TAG.tar.gz
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Upload to Artifacts as backup from cache
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.ARTIFACT_NAME }}-${{ env.RELEASE_TAG }}
+        path: $CACHE_DIR/$ARTIFACT_NAME-$RELEASE_TAG.tar.gz
+        retention-days: 1
+
+    - name: Monitor cache performance
+      run: |
+        echo "📊 Performance Report:"
+        echo "💾 Final disk space:"
+        df -h
+        echo "🚀 Cache directory usage:"
+        du -sh $CACHE_DIR || echo "Cache directory not available"
+        echo "✅ Process completed with cache optimization"
+
+    - name: Clean cache
+      run: |
+        echo "🧹 Cleaning cache..."
+        rm -rf $CACHE_DIR/firmware
+        rm -f $CACHE_DIR/lpunpack.py
+        rm -f $CACHE_DIR/*.tar.gz
+        echo "💾 Space after cleanup:"
+        df -h
+
+    - name: Success message
+      run: |
+        echo "✅ العملية اكتملت بنجاح!"
+        echo "🚀 تم الرفع على Releases: $ARTIFACT_NAME-$RELEASE_TAG"
+        echo "💾 تم استخدام cache disk لزيادة السرعة"
+        echo "📥 المفات المستخرجة: $TARGET_PARTITIONS"
+        echo "⚡ الأداء محسن باستخدام التخزين المؤقت"
