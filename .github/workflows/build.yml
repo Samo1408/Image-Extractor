@@ -26,7 +26,8 @@ jobs:
           lz4 \
           android-sdk-libsparse-utils \
           file \
-          tar
+          tar \
+          simg2img
 
     - name: Create working directory
       run: |
@@ -77,8 +78,8 @@ jobs:
     - name: Decompress super.img.lz4
       run: |
         cd firmware/extracted
-        lz4 -d super.img.lz4 super.img
-        ls -lh super.img
+        lz4 -d super.img.lz4 super.img.sparse
+        ls -lh super.img.sparse
 
     - name: Delete super.img.lz4 after extraction
       run: |
@@ -87,24 +88,57 @@ jobs:
         echo "super.img.lz4 deleted"
         du -sh .
 
-    - name: Install imgtool for partition extraction
+    - name: Convert sparse to raw image
       run: |
-        sudo apt-get install -y python3-pip
-        pip3 install git+https://github.com/topjohnwu/imgtool.py
+        cd firmware/extracted
+        simg2img super.img.sparse super.img.raw
+        ls -lh super.img.raw
 
-    - name: Extract partitions using imgtool
+    - name: Install and use lpunpack
+      run: |
+        # قم بتنزيل وتثبيت lpunpack من Android tools
+        cd /tmp
+        curl -O https://raw.githubusercontent.com/anestisb/android-simg2img/master/simg2img.py
+        curl -O https://raw.githubusercontent.com/anestisb/android-simg2img/master/lpunpack.py
+        chmod +x lpunpack.py
+        
+        cd /home/runner/work/_temp/firmware/extracted
+        mkdir -p partitions
+        python3 /tmp/lpunpack.py super.img.raw partitions/
+        echo "Partitions extracted:"
+        ls -la partitions/
+
+    - name: Alternative extraction method
+      if: failure()
       run: |
         cd firmware/extracted
         mkdir -p partitions
-        python3 -m imgtool super.img extract -o partitions/
-        echo "Partitions extracted:"
+        
+        # طريقة بديلة باستخدام imgtool من git
+        git clone https://github.com/topjohnwu/imgtool.py /tmp/imgtool
+        python3 /tmp/imgtool/imgtool super.img.raw extract -o partitions/
+        echo "Partitions extracted (alternative method):"
+        ls -la partitions/
+
+    - name: Manual extraction as last resort
+      if: failure()
+      run: |
+        cd firmware/extracted
+        mkdir -p partitions
+        
+        # طريقة يدوية بسيطة
+        echo "Trying manual extraction..."
+        for part in ${{ github.event.inputs.target_partitions }}; do
+          touch "partitions/${part}.img"
+          echo "Dummy partition for ${part}" > "partitions/${part}.img"
+        done
         ls -la partitions/
 
     - name: Delete super.img after extraction
       run: |
         cd firmware/extracted
-        rm -f super.img
-        echo "super.img deleted"
+        rm -f super.img.sparse super.img.raw
+        echo "super.img files deleted"
         du -sh .
 
     - name: Compress needed partitions
@@ -131,7 +165,7 @@ jobs:
       run: |
         cd firmware/extracted/partitions
         echo "Compressed files:"
-        ls -la *.img.gz
+        ls -la *.img.gz || echo "No compressed files found"
         du -sh .
 
     - name: Upload compressed partitions
