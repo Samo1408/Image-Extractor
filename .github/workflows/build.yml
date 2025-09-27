@@ -1,4 +1,4 @@
-name: Extract Super.img Parts Without Cache
+name: Extract Samsung Partitions with Release
 
 on:
   workflow_dispatch:
@@ -14,13 +14,22 @@ on:
         description: "وسم الإصدار (مثال: v1.0.0)"
         required: true
         default: "v1.0.0"
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
-  extract-partitions:
+  extract-and-release:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     
     steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
     - name: Check initial disk space
       run: |
         echo "💾 Initial disk space:"
@@ -38,7 +47,6 @@ jobs:
 
     - name: Download lpunpack.py
       run: |
-        cd /tmp
         curl -s -O https://raw.githubusercontent.com/Samo1408/Image-Extractor/main/lpunpack.py
         echo "✅ lpunpack.py downloaded"
 
@@ -52,26 +60,33 @@ jobs:
           ARTIFACT_NAME="system-vendor"
         fi
         
-        CLEAN_TAG=$(echo "${{ github.event.inputs.release_tag }}" | tr ' ' '-' | tr -cd '[:alnum:]-._')
+        # إذا تم التشغيل عن طريق tag، استخدم اسم الtag
+        if [ -n "${{ github.ref_name }}" ] && [[ "${{ github.ref_name }}" == v* ]]; then
+          RELEASE_TAG="${{ github.ref_name }}"
+        else
+          CLEAN_TAG=$(echo "${{ github.event.inputs.release_tag }}" | tr ' ' '-' | tr -cd '[:alnum:]-._')
+          RELEASE_TAG="$CLEAN_TAG"
+        fi
         
         echo "TARGET_PARTITIONS=$TARGET_PARTITIONS" >> $GITHUB_ENV
         echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
-        echo "RELEASE_TAG=$CLEAN_TAG" >> $GITHUB_ENV
+        echo "RELEASE_TAG=$RELEASE_TAG" >> $GITHUB_ENV
         
         echo "✅ Partitions to extract: $TARGET_PARTITIONS"
         echo "📁 Artifact name: $ARTIFACT_NAME"
+        echo "🏷️ Release tag: $RELEASE_TAG"
 
     - name: Download and extract firmware
       run: |
-        mkdir -p /tmp/firmware
-        cd /tmp/firmware
+        mkdir -p firmware
+        cd firmware
         curl -L -o firmware.zip "${{ github.event.inputs.zip_url }}"
         echo "📦 Downloaded file"
         ls -lh firmware.zip
 
     - name: Extract ZIP and process AP file
       run: |
-        cd /tmp/firmware
+        cd firmware
         unzip -o firmware.zip -d extracted_zip/
         rm -f firmware.zip
         
@@ -87,7 +102,7 @@ jobs:
 
     - name: Extract AP and handle super.img
       run: |
-        cd /tmp/firmware
+        cd firmware
         tar -xf ap_file.tar.md5
         rm -f ap_file.tar.md5
         
@@ -106,7 +121,7 @@ jobs:
 
     - name: Decompress and convert super.img
       run: |
-        cd /tmp/firmware
+        cd firmware
         lz4 -d super.img.lz4 super.img.sparse
         rm -f super.img.lz4
         simg2img super.img.sparse super.img.raw
@@ -115,15 +130,15 @@ jobs:
 
     - name: Extract partitions using lpunpack
       run: |
-        cd /tmp/firmware
+        cd firmware
         mkdir -p partitions
-        python3 /tmp/lpunpack.py super.img.raw partitions/
+        python3 ../lpunpack.py super.img.raw partitions/
         echo "📂 Partitions extracted:"
         ls -la partitions/
 
     - name: Filter requested partitions
       run: |
-        cd /tmp/firmware/partitions
+        cd firmware/partitions
         
         echo "🔧 Filtering partitions. Keeping only: $TARGET_PARTITIONS"
         
@@ -140,9 +155,9 @@ jobs:
         echo "📂 Remaining partitions:"
         ls -la *.img 2>/dev/null || echo "No partitions found"
 
-    - name: Compress partitions and verify
+    - name: Compress partitions
       run: |
-        cd /tmp/firmware/partitions
+        cd firmware/partitions
         
         echo "🔧 Compressing partitions..."
         for part in $TARGET_PARTITIONS; do
@@ -156,11 +171,11 @@ jobs:
           fi
         done
 
-    - name: Create final release package
+    - name: Create final package
       run: |
-        cd /tmp/firmware/partitions
+        cd firmware/partitions
         
-        FINAL_FILE="/tmp/$ARTIFACT_NAME-$RELEASE_TAG.tar.gz"
+        FINAL_FILE="../$ARTIFACT_NAME-$RELEASE_TAG.tar.gz"
         
         if ls *.gz 1> /dev/null 2>&1; then
           echo "📦 Creating final package: $FINAL_FILE"
@@ -173,67 +188,95 @@ jobs:
           exit 1
         fi
 
-    - name: Verify final file exists
-      run: |
-        if [ -f "$FINAL_FILE" ]; then
-          echo "✅ Final file exists: $FINAL_FILE"
-          echo "📊 File size: $(ls -lh $FINAL_FILE | awk '{print $5}')"
-        else
-          echo "❌ Final file not found"
-          exit 1
-        fi
+    - name: Create GitHub Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ env.RELEASE_TAG }}
+        release_name: "Partitions ${{ env.ARTIFACT_NAME }} - ${{ env.RELEASE_TAG }}"
+        body: |
+          Partitions Extracted: ${{ env.TARGET_PARTITIONS }}
+          
+          ## 📋 المفات المستخرجة:
+          ${{ env.TARGET_PARTITIONS }}
+          
+          ## 🔧 طريقة الاستخدام:
+          - حمل الملف المضغوط
+          - فك الضغط: `tar -xzf ${{ env.ARTIFACT_NAME }}-${{ env.RELEASE_TAG }}.tar.gz`
+          - استخدم الملفات حسب الحاجة
+          
+          Generated automatically by GitHub Actions.
+        draft: false
+        prerelease: false
 
-    - name: Upload to GitHub Artifacts (Primary)
+    - name: Upload to Release
+      run: |
+        UPLOAD_URL="${{ steps.create_release.outputs.upload_url }}"
+        # إصلاح الرابط - إزالة {?name,label}
+        UPLOAD_URL=$(echo $UPLOAD_URL | sed 's/{.*}//')
+        echo "🔗 Upload URL: $UPLOAD_URL"
+        
+        echo "📤 رفع الملف إلى Release..."
+        curl -X POST \
+          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          -H "Content-Type: application/gzip" \
+          -H "Accept: application/vnd.github.v3+json" \
+          --data-binary @"$FINAL_FILE" \
+          "$UPLOAD_URL?name=$ARTIFACT_NAME-$RELEASE_TAG.tar.gz"
+        
+        echo "✅ تم الرفع بنجاح!"
+
+    - name: Create instructions file
+      run: |
+        cat > INSTRUCTIONS.md << EOF
+        # 📚 تعليمات الاستخدام
+        
+        ## المفات المستخرجة:
+        $TARGET_PARTITIONS
+        
+        ## طريقة الاستخدام:
+        1. حمل الملف: $ARTIFACT_NAME-$RELEASE_TAG.tar.gz
+        2. فك الضغط: 
+           \`\`\`bash
+           tar -xzf $ARTIFACT_NAME-$RELEASE_TAG.tar.gz
+           \`\`\`
+        3. استخدم الملفات حسب الحاجة
+        
+        ## معلومات التقنية:
+        - وسْم الإصدار: $RELEASE_TAG
+        - تاريخ الإنشاء: $(date)
+        - المنصة: Samsung Super.img
+        EOF
+        
+        UPLOAD_URL=$(echo "${{ steps.create_release.outputs.upload_url }}" | sed 's/{.*}//')
+        
+        curl -X POST \
+          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          -H "Content-Type: text/markdown" \
+          -H "Accept: application/vnd.github.v3+json" \
+          --data-binary @INSTRUCTIONS.md \
+          "$UPLOAD_URL?name=INSTRUCTIONS.md"
+
+    - name: Upload to Artifacts as backup
       uses: actions/upload-artifact@v4
       with:
         name: partitions-${{ env.ARTIFACT_NAME }}-${{ env.RELEASE_TAG }}
         path: ${{ env.FINAL_FILE }}
         retention-days: 7
 
-    - name: Try GitHub Release (Optional - Skip if no permissions)
-      if: success()
+    - name: Cleanup
       run: |
-        echo "🔧 Attempting to create GitHub Release..."
-        
-        # استخدام أداة موثوقة لإنشاء الـRelease
-        response=$(curl -s -w "%{http_code}" -X POST \
-          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-          -H "Content-Type: application/json" \
-          -d '{
-            "tag_name": "'"$RELEASE_TAG"'",
-            "name": "Partitions '"$ARTIFACT_NAME"' - '"$RELEASE_TAG"'",
-            "body": "Partitions Extracted: '"$TARGET_PARTITIONS"'"
-          }' \
-          "https://api.github.com/repos/$GITHUB_REPOSITORY/releases")
-        
-        http_code="${response: -3}"
-        response_body="${response%???}"
-        
-        echo "📋 GitHub API Response Code: $http_code"
-        
-        if [ "$http_code" -eq 201 ]; then
-          echo "✅ GitHub Release created successfully"
-          # هنا يمكن إضافة رفع الملف إلى الـRelease
-        elif [ "$http_code" -eq 403 ]; then
-          echo "⚠️ GitHub Release failed: Permission denied"
-          echo "💡 Releases are disabled for this repository/workflow"
-          echo "📦 Files are available in Artifacts tab"
-        else
-          echo "⚠️ GitHub Release failed with code: $http_code"
-          echo "📦 Using Artifacts as primary storage"
-        fi
-
-    - name: Final cleanup
-      run: |
-        rm -rf /tmp/firmware
-        rm -f /tmp/lpunpack.py
-        rm -f /tmp/*.tar.gz
-        echo "🧹 Cleanup completed"
+        rm -rf firmware
+        rm -f lpunpack.py
+        rm -f INSTRUCTIONS.md
+        echo "🧹 تم التنظيف"
 
     - name: Success message
       run: |
         echo "🎉 العملية اكتملت بنجاح!"
-        echo "📥 الملفات متاحة في: Actions → Artifacts → partitions-$ARTIFACT_NAME-$RELEASE_TAG"
-        echo "🔧 المفات المستخرجة: $TARGET_PARTITIONS"
-        echo "🏷️ وسْم الإصدار: $RELEASE_TAG"
-        echo "💡 لتمكين الـReleases، تحتاج إلى تعديل صلاحيات الـrepository"
+        echo "🚀 تم الرفع إلى Releases: $ARTIFACT_NAME-$RELEASE_TAG"
+        echo "📥 المفات المستخرجة: $TARGET_PARTITIONS"
+        echo "📎 رابط الRelease: https://github.com/$GITHUB_REPOSITORY/releases/tag/$RELEASE_TAG"
+        echo "💾 الملفات متاحة في صفحة Releases"
