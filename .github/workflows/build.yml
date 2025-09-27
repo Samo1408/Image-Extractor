@@ -38,18 +38,22 @@ jobs:
           lz4 \
           android-sdk-libsparse-utils \
           git \
-          gcc \
-          python3-dev
+          python3 \
+          python3-pip
 
-    - name: Clone and build lpunpack from your repository
+    - name: Download lpunpack.py from the new repository
       run: |
         cd /tmp
-        git clone https://github.com/unix3dgforce/lpunpack.git
-        cd lpunpack
-        make
-        sudo cp lpunpack /usr/local/bin/
-        echo "✅ lpunpack installed successfully"
-        lpunpack --help || echo "lpunpack ready to use"
+        # تحميل الملف مباشرة من المستودع الجديد
+        curl -s -O https://raw.githubusercontent.com/Samo1408/Image-Extractor/main/lpunpack.py
+        chmod +x lpunpack.py
+        echo "✅ lpunpack.py downloaded successfully"
+        
+        # اختبار أن الملف يعمل
+        python3 -c "import argparse, enum, dataclasses, pathlib, typing; print('✅ All required modules are available')"
+        
+        # اختبار تشغيل lpunpack
+        python3 lpunpack.py --help || python3 lpunpack.py -h || echo "lpunpack ready to use"
 
     - name: Determine partitions to extract
       run: |
@@ -67,7 +71,7 @@ jobs:
         echo "TARGET_PARTITIONS=$TARGET_PARTITIONS" >> $GITHUB_ENV
         echo "✅ Partitions to extract: $TARGET_PARTITIONS"
 
-    - name: Download and extract step by step
+    - name: Download and extract firmware
       run: |
         mkdir -p /tmp/firmware
         cd /tmp/firmware
@@ -76,7 +80,7 @@ jobs:
         echo "📦 Downloaded file:"
         ls -lh firmware.zip
 
-    - name: Extract ZIP and find AP file
+    - name: Extract ZIP and process AP file
       run: |
         cd /tmp/firmware
         unzip -o firmware.zip -d extracted_zip/
@@ -92,7 +96,7 @@ jobs:
         fi
         rm -rf extracted_zip/
 
-    - name: Extract AP and find super.img
+    - name: Extract AP and prepare super.img
       run: |
         cd /tmp/firmware
         tar -xf ap_file.tar.md5
@@ -108,44 +112,40 @@ jobs:
           fi
         fi
 
-    - name: Decompress LZ4
+    - name: Decompress and convert super.img
       run: |
         cd /tmp/firmware
         lz4 -d super.img.lz4 super.img.sparse
         rm -f super.img.lz4
-
-    - name: Convert to raw image
-      run: |
-        cd /tmp/firmware
         simg2img super.img.sparse super.img.raw
         rm -f super.img.sparse
-        echo "✅ super.img.raw ready for extraction"
+        echo "✅ super.img.raw ready"
         ls -lh super.img.raw
 
-    - name: Extract partitions using your lpunpack
+    - name: Extract partitions using lpunpack
       run: |
         cd /tmp/firmware
         mkdir -p partitions
         
-        echo "🔧 Extracting partitions using lpunpack..."
-        lpunpack super.img.raw partitions/
+        echo "🔧 Extracting partitions with lpunpack.py..."
+        python3 /tmp/lpunpack.py super.img.raw partitions/
         
-        echo "📂 All partitions found:"
+        echo "📂 Partitions extracted:"
         ls -la partitions/
-        echo "📋 Partitions list:"
-        ls -1 partitions/ | head -20
+        echo "📋 List of partitions:"
+        ls -1 partitions/ | head -15
 
-    - name: Filter requested partitions only
+    - name: Filter requested partitions
       run: |
         cd /tmp/firmware/partitions
         
         echo "🔧 Filtering partitions. Keeping only: $TARGET_PARTITIONS"
         
-        # إنشاء قائمة بجميع المفات المتاحة
-        AVAILABLE_PARTITIONS=$(ls *.img 2>/dev/null | sed 's/\.img$//' || echo "")
-        echo "📋 Available partitions: $AVAILABLE_PARTITIONS"
+        # عرض جميع المفات المتاحة أولاً
+        echo "📋 Available partitions:"
+        ls -la *.img 2>/dev/null | head -10 || echo "No .img files found"
         
-        # حفظ المفات المطلوبة وحذف البقية
+        # فلترة المفات
         for partition in *.img; do
           partition_name=$(basename "$partition" .img)
           if echo "$TARGET_PARTITIONS" | grep -qw "$partition_name"; then
@@ -157,7 +157,7 @@ jobs:
         done
         
         echo "📂 Partitions after filtering:"
-        ls -la *.img 2>/dev/null || echo "No partitions found after filtering"
+        ls -la *.img 2>/dev/null || echo "No partitions remaining after filtering"
 
     - name: Verify requested partitions exist
       run: |
@@ -167,14 +167,21 @@ jobs:
         FOUND_COUNT=0
         for part in $TARGET_PARTITIONS; do
           if [ -f "${part}.img" ]; then
-            echo "✅ Found: ${part}.img ($(ls -lh "${part}.img" | awk '{print $5}'))"
+            SIZE=$(ls -lh "${part}.img" | awk '{print $5}')
+            echo "✅ Found: ${part}.img ($SIZE)"
             FOUND_COUNT=$((FOUND_COUNT + 1))
           else
             echo "❌ Missing: ${part}.img"
           fi
         done
         
-        echo "📊 Found $FOUND_COUNT out of $(echo $TARGET_PARTITIONS | wc -w) requested partitions"
+        if [ $FOUND_COUNT -eq 0 ]; then
+          echo "⚠️  No requested partitions were found!"
+          echo "📋 All available files:"
+          ls -la
+        else
+          echo "📊 Found $FOUND_COUNT out of $(echo $TARGET_PARTITIONS | wc -w) requested partitions"
+        fi
 
     - name: Cleanup super image
       run: |
@@ -200,12 +207,10 @@ jobs:
         done
         
         if [ $COMPRESSED_COUNT -eq 0 ]; then
-          echo "⚠️  No requested partitions were found to compress"
-          echo "📋 Available files:"
-          ls -la
+          echo "⚠️  No partitions were compressed"
         else
           echo "✅ Successfully compressed $COMPRESSED_COUNT partitions"
-          echo "📊 Total size:"
+          echo "📊 Total size of compressed files:"
           du -sh .
         fi
 
@@ -219,8 +224,8 @@ jobs:
 
     - name: Final cleanup
       run: |
-        rm -rf /tmp/firmware/
-        rm -rf /tmp/lpunpack/
+        rm -rf /tmp/firmware
+        rm -f /tmp/lpunpack.py
         echo "🧹 Cleanup completed"
 
     - name: Success message
@@ -228,4 +233,4 @@ jobs:
         echo "✅ العملية اكتملت بنجاح!"
         echo "📥 يمكنك تحميل الملفات من قسم Artifacts"
         echo "🔧 المفات المطلوبة: $TARGET_PARTITIONS"
-        echo "🛠️ تم استخدام lpunpack من مستودعك الخاص"
+        echo "🛠️ تم استخدام lpunpack.py من المستودع: Samo1408/Image-Extractor"
