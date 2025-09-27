@@ -24,39 +24,93 @@ jobs:
           p7zip-full \
           curl \
           lz4 \
-          android-sdk-libsparse-utils
+          android-sdk-libsparse-utils \
+          file \
+          tar
 
     - name: Create working directory
       run: |
         mkdir -p firmware/extracted
 
-    - name: Download AP file (resumable)
+    - name: Download first 10MB to check file type
       run: |
         cd firmware
-        curl -L -C - -o ap_file.zip "${{ github.event.inputs.ap_url }}"
-        ls -lh ap_file.zip
+        curl -L -o ap_file.head "${{ github.event.inputs.ap_url }}" --range 0-10000000
+        file ap_file.head
+        hexdump -C ap_file.head | head -20
 
-    - name: Extract super.img.lz4 from AP archive
+    - name: Download full AP file (resumable)
       run: |
         cd firmware
-        7z x ap_file.zip -oextracted/ "super.img.lz4" -r
+        curl -L -C - -o ap_file.bin "${{ github.event.inputs.ap_url }}"
+        ls -lh ap_file.bin
+
+    - name: Detect and extract file format
+      run: |
+        cd firmware
+        echo "=== Detecting file type ==="
+        file ap_file.bin
+        
+        # حاول استخراج بجميع الطرق الممكنة
+        7z x ap_file.bin -oextracted/ -y || true
+        tar -xf ap_file.bin -C extracted/ || true
+        
+        # إذا فشل كل شيء، غير الامتداد وحاول مجدداً
+        if [ ! -f extracted/super.img.lz4 ]; then
+          cp ap_file.bin ap_file.tar
+          7z x ap_file.tar -oextracted/ -y || true
+        fi
+        
         ls -la extracted/
+        find extracted/ -name "*.lz4" -o -name "super.img*" | head -10
 
-    - name: Decompress LZ4 and convert sparse to raw
+    - name: Find and extract super.img.lz4
+      run: |
+        cd firmware
+        SUPER_FILE=$(find extracted/ -name "super.img.lz4" -o -name "*.lz4" | head -1)
+        if [ -n "$SUPER_FILE" ]; then
+          echo "Found super file: $SUPER_FILE"
+          cp "$SUPER_FILE" extracted/super.img.lz4
+        else
+          echo "=== Listing all files ==="
+          find extracted/ -type f | head -20
+          echo "=== Checking for super.img without compression ==="
+          find extracted/ -name "super.img" | head -1
+        fi
+
+    - name: Handle super.img extraction
       run: |
         cd firmware/extracted
-        lz4 -d super.img.lz4 super.img.sparse
+        
+        if [ -f "super.img.lz4" ]; then
+          echo "Extracting from LZ4 compression"
+          lz4 -d super.img.lz4 super.img.sparse
+        elif [ -f "super.img" ]; then
+          echo "Super.img found directly"
+          cp super.img super.img.sparse
+        else
+          echo "=== Trying to find any super.img file ==="
+          find . -name "super.img*" -exec ls -la {} \;
+          SUPER_FILE=$(find . -name "super.img*" ! -name "*.lz4" | head -1)
+          if [ -n "$SUPER_FILE" ]; then
+            cp "$SUPER_FILE" super.img.sparse
+          else
+            echo "ERROR: No super.img file found"
+            exit 1
+          fi
+        fi
+        
+        ls -lh *.sparse*
+
+    - name: Convert sparse to raw and extract partitions
+      run: |
+        cd firmware/extracted
         simg2img super.img.sparse super.img.raw
-        ls -lh *.img*
-
-    - name: Extract partitions using lpunpack
-      run: |
-        cd firmware/extracted
         mkdir -p partitions
         lpunpack super.img.raw partitions/
         ls -la partitions/
 
-    - name: Filter and compress only needed partitions
+    - name: Filter and compress needed partitions
       run: |
         cd firmware/extracted/partitions
         for part in ${{ github.event.inputs.target_partitions }}; do
@@ -73,26 +127,20 @@ jobs:
       run: |
         cd firmware/extracted/partitions
         echo "=== Available partitions ==="
-        ls -la *.img || echo "No .img files found"
+        ls -la *.img 2>/dev/null || echo "No .img files found"
         echo "=== Compressed files ==="
-        ls -la *.img.gz || echo "No .img.gz files found"
+        ls -la *.img.gz 2>/dev/null || echo "No .img.gz files found"
 
     - name: Upload compressed partitions
       uses: actions/upload-artifact@v4
       with:
         name: samsung-partitions
-        path: |
-          firmware/extracted/partitions/*.img.gz
+        path: firmware/extracted/partitions/*.img.gz
         retention-days: 1
         compression-level: 0
 
-    - name: Cleanup to save space
+    - name: Cleanup
       run: |
         rm -rf firmware/extracted/super.img.*
-        rm -rf firmware/ap_file.zip
+        rm -rf firmware/ap_file.*
         du -sh firmware/
-
-    - name: Show final result
-      run: |
-        echo "=== Extraction completed successfully ==="
-        echo "Download partitions from the Artifacts section above"
