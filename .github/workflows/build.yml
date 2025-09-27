@@ -29,14 +29,27 @@ jobs:
         echo "💾 Disk space before starting:"
         df -h
 
-    - name: Install essential tools only
+    - name: Install essential tools
       run: |
         sudo apt-get update
         sudo apt-get install -y \
           unzip \
           curl \
           lz4 \
-          android-sdk-libsparse-utils
+          android-sdk-libsparse-utils \
+          git \
+          gcc \
+          python3-dev
+
+    - name: Clone and build lpunpack from your repository
+      run: |
+        cd /tmp
+        git clone https://github.com/unix3dgforce/lpunpack.git
+        cd lpunpack
+        make
+        sudo cp lpunpack /usr/local/bin/
+        echo "✅ lpunpack installed successfully"
+        lpunpack --help || echo "lpunpack ready to use"
 
     - name: Determine partitions to extract
       run: |
@@ -106,31 +119,31 @@ jobs:
         cd /tmp/firmware
         simg2img super.img.sparse super.img.raw
         rm -f super.img.sparse
+        echo "✅ super.img.raw ready for extraction"
+        ls -lh super.img.raw
 
-    - name: Download reliable extraction tool
-      run: |
-        cd /tmp/firmware
-        # تنزيل أداة موثوقة لاستخراج المفات
-        curl -s -O https://raw.githubusercontent.com/anestisb/android-simg2img/master/simg2img.py
-        curl -s -O https://raw.githubusercontent.com/anestisb/android-simg2img/master/lpunpack.py
-        chmod +x lpunpack.py
-
-    - name: Extract partitions using lpunpack
+    - name: Extract partitions using your lpunpack
       run: |
         cd /tmp/firmware
         mkdir -p partitions
         
         echo "🔧 Extracting partitions using lpunpack..."
-        python3 lpunpack.py super.img.raw partitions/
+        lpunpack super.img.raw partitions/
         
         echo "📂 All partitions found:"
         ls -la partitions/
+        echo "📋 Partitions list:"
+        ls -1 partitions/ | head -20
 
     - name: Filter requested partitions only
       run: |
         cd /tmp/firmware/partitions
         
         echo "🔧 Filtering partitions. Keeping only: $TARGET_PARTITIONS"
+        
+        # إنشاء قائمة بجميع المفات المتاحة
+        AVAILABLE_PARTITIONS=$(ls *.img 2>/dev/null | sed 's/\.img$//' || echo "")
+        echo "📋 Available partitions: $AVAILABLE_PARTITIONS"
         
         # حفظ المفات المطلوبة وحذف البقية
         for partition in *.img; do
@@ -151,22 +164,17 @@ jobs:
         cd /tmp/firmware/partitions
         
         echo "🔍 Verifying requested partitions:"
-        ALL_FOUND=true
+        FOUND_COUNT=0
         for part in $TARGET_PARTITIONS; do
           if [ -f "${part}.img" ]; then
-            echo "✅ Found: ${part}.img"
-            ls -lh "${part}.img"
+            echo "✅ Found: ${part}.img ($(ls -lh "${part}.img" | awk '{print $5}'))"
+            FOUND_COUNT=$((FOUND_COUNT + 1))
           else
             echo "❌ Missing: ${part}.img"
-            ALL_FOUND=false
           fi
         done
         
-        if [ "$ALL_FOUND" = "false" ]; then
-          echo "⚠️  Some requested partitions were not found"
-          echo "📋 Available partitions:"
-          ls -la *.img 2>/dev/null || echo "No partitions available"
-        fi
+        echo "📊 Found $FOUND_COUNT out of $(echo $TARGET_PARTITIONS | wc -w) requested partitions"
 
     - name: Cleanup super image
       run: |
@@ -197,6 +205,8 @@ jobs:
           ls -la
         else
           echo "✅ Successfully compressed $COMPRESSED_COUNT partitions"
+          echo "📊 Total size:"
+          du -sh .
         fi
 
     - name: Upload results
@@ -210,6 +220,7 @@ jobs:
     - name: Final cleanup
       run: |
         rm -rf /tmp/firmware/
+        rm -rf /tmp/lpunpack/
         echo "🧹 Cleanup completed"
 
     - name: Success message
@@ -217,3 +228,4 @@ jobs:
         echo "✅ العملية اكتملت بنجاح!"
         echo "📥 يمكنك تحميل الملفات من قسم Artifacts"
         echo "🔧 المفات المطلوبة: $TARGET_PARTITIONS"
+        echo "🛠️ تم استخدام lpunpack من مستودعك الخاص"
