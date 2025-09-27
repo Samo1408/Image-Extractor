@@ -4,17 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       ap_url:
-        description: "https://mde1.androidfilehost.com/dl/4G22l9pb8yI1LM636YEHlw/1759067744/4279422670115711601/M127GXXU3BVG2_M127GODM3BVG2_NPB.zip"
+        description: "رابط ملف AP مباشر من السحابة"
         required: true
       target_partitions:
-        description: "vendor"
+        description: "المفات المطلوبة (مثال: system vendor product odm)"
         required: false
-        default: "vendor"
+        default: "system vendor product odm prism optics"
 
 jobs:
   extract-partitions:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
     
     steps:
     - name: Install essential tools
@@ -24,8 +24,7 @@ jobs:
           p7zip-full \
           curl \
           lz4 \
-          android-sdk-libsparse-utils \
-          simg2img
+          android-sdk-libsparse-utils
 
     - name: Create working directory
       run: |
@@ -43,7 +42,7 @@ jobs:
         7z x ap_file.zip -oextracted/ "super.img.lz4" -r
         ls -la extracted/
 
-    - name: Decompress LZ4 and convert to raw image
+    - name: Decompress LZ4 and convert sparse to raw
       run: |
         cd firmware/extracted
         lz4 -d super.img.lz4 super.img.sparse
@@ -65,8 +64,18 @@ jobs:
             echo "Compressing ${part}.img"
             gzip -c "${part}.img" > "${part}.img.gz"
             ls -lh "${part}.img.gz"
+          else
+            echo "Partition ${part}.img not found"
           fi
         done
+
+    - name: List available partitions
+      run: |
+        cd firmware/extracted/partitions
+        echo "=== Available partitions ==="
+        ls -la *.img || echo "No .img files found"
+        echo "=== Compressed files ==="
+        ls -la *.img.gz || echo "No .img.gz files found"
 
     - name: Upload compressed partitions
       uses: actions/upload-artifact@v4
@@ -75,10 +84,15 @@ jobs:
         path: |
           firmware/extracted/partitions/*.img.gz
         retention-days: 1
-        compression-level: 0  # لأن الملفات مضغوطة مسبقاً
+        compression-level: 0
 
     - name: Cleanup to save space
       run: |
         rm -rf firmware/extracted/super.img.*
         rm -rf firmware/ap_file.zip
         du -sh firmware/
+
+    - name: Show final result
+      run: |
+        echo "=== Extraction completed successfully ==="
+        echo "Download partitions from the Artifacts section above"
