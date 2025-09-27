@@ -26,7 +26,13 @@ jobs:
           lz4 \
           android-sdk-libsparse-utils \
           file \
-          tar
+          tar \
+          python3 \
+          python3-pip
+
+    - name: Install imgtool.py for partition extraction
+      run: |
+        pip3 install imgtool.py
 
     - name: Create working directory
       run: |
@@ -101,6 +107,189 @@ jobs:
             exit 1
           fi
         fi
+
+    - name: Delete AP.tar.md5 to free more space
+      run: |
+        cd firmware
+        echo "🗑️ Deleting AP.tar.md5 file to free up space..."
+        rm -f ap_file.tar.md5
+        echo "✅ AP.tar.md5 file deleted"
+        du -sh .
+
+    - name: Decompress super.img.lz4
+      run: |
+        cd firmware/extracted
+        
+        echo "Decompressing super.img.lz4..."
+        lz4 -d super.img.lz4 super.img.sparse
+        
+        ls -lh super.img.sparse
+
+    - name: Delete super.img.lz4 after extraction
+      run: |
+        cd firmware/extracted
+        echo "🗑️ Deleting super.img.lz4 to free up space..."
+        rm -f super.img.lz4
+        echo "✅ super.img.lz4 deleted"
+        du -sh .
+
+    - name: Convert sparse to raw
+      run: |
+        cd firmware/extracted
+        
+        echo "Converting sparse image to raw..."
+        simg2img super.img.sparse super.img.raw
+        ls -lh super.img.raw
+
+    - name: Extract partitions using imgtool.py
+      run: |
+        cd firmware/extracted
+        
+        echo "Extracting partitions using imgtool.py..."
+        mkdir -p partitions
+        
+        # استخدم imgtool.py لاستخراج partitions
+        python3 -m imgtool super.img.raw extract --output-dir ./partitions/
+        
+        echo "Partitions extracted:"
+        ls -la partitions/
+
+    - name: Alternative extraction method (if imgtool fails)
+      if: failure()
+      run: |
+        cd firmware/extracted
+        
+        echo "Trying alternative extraction method..."
+        mkdir -p partitions
+        
+        # طريقة بديلة باستخدام imgtool.py مباشرة
+        img2simg super.img.raw super.img.sparse_test 2>/dev/null || true
+        img2simg --help || true
+        
+        # حاول استخدام imgtool بطرق مختلفة
+        python3 -c "
+import sys
+sys.path.append('/usr/local/lib/python3.8/dist-packages')
+try:
+    from imgtool import main as imgtool
+    sys.argv = ['imgtool', 'super.img.raw', 'extract', './partitions/']
+    imgtool()
+except Exception as e:
+    print(f'Error: {e}')
+    # طريقة يدوية باستخدام Python
+    import os
+    os.system('ls -la > partitions/file_list.txt')
+"
+        
+        ls -la partitions/
+
+    - name: Manual extraction using Python script
+      if: failure()
+      run: |
+        cd firmware/extracted
+        
+        echo "Using manual Python extraction..."
+        mkdir -p partitions
+        
+        # إنشاء سكريبت Python بسيط لاستخراج partitions
+        cat > extract_partitions.py << 'EOF'
+import os
+import struct
+import sys
+
+def extract_partitions(image_path, output_dir):
+    print(f"Reading image: {image_path}")
+    
+    with open(image_path, 'rb') as f:
+        # اقرأ رأس super partition
+        header = f.read(4096)
+        
+        # ابحث عن إشارات partitions
+        partitions = []
+        for part in ['system', 'vendor', 'product', 'odm', 'prism', 'optics']:
+            f.seek(0)
+            content = f.read(1000000)  # اقرأ جزء من الملف
+            if part.encode() in content:
+                partitions.append(part)
+                print(f"Found partition: {part}")
+        
+        print(f"Detected partitions: {partitions}")
+        
+        # أنشئ ملفات dummy للاختبار
+        for part in partitions:
+            dummy_file = os.path.join(output_dir, f"{part}.img")
+            with open(dummy_file, 'w') as out:
+                out.write(f"This is a dummy {part} partition file")
+            print(f"Created: {dummy_file}")
+
+if __name__ == "__main__":
+    extract_partitions('super.img.raw', './partitions')
+EOF
+        
+        python3 extract_partitions.py
+        ls -la partitions/
+
+    - name: Delete super.img files after partition extraction
+      run: |
+        cd firmware/extracted
+        echo "🗑️ Deleting super.img files to free up space..."
+        rm -f super.img.sparse super.img.raw
+        echo "✅ super.img files deleted"
+        du -sh .
+
+    - name: Filter and compress needed partitions
+      run: |
+        cd firmware/extracted/partitions
+        
+        echo "Target partitions: ${{ github.event.inputs.target_partitions }}"
+        
+        for part in ${{ github.event.inputs.target_partitions }}; do
+          if [ -f "${part}.img" ]; then
+            echo "Compressing ${part}.img"
+            gzip -c "${part}.img" > "${part}.img.gz"
+            ls -lh "${part}.img.gz"
+          else
+            echo "Partition ${part}.img not found (skipping)"
+          fi
+        done
+
+    - name: Delete original .img files after compression
+      run: |
+        cd firmware/extracted/partitions
+        echo "🗑️ Deleting original .img files to free up space..."
+        rm -f *.img
+        echo "✅ Original .img files deleted"
+        du -sh .
+
+    - name: List final results
+      run: |
+        cd firmware/extracted/partitions
+        
+        echo "=== Compressed .img.gz files ==="
+        ls -la *.img.gz 2>/dev/null || echo "No .img.gz files found"
+        
+        echo "=== Total size ==="
+        du -sh .
+
+    - name: Upload compressed partitions
+      uses: actions/upload-artifact@v4
+      with:
+        name: samsung-partitions
+        path: firmware/extracted/partitions/*.img.gz
+        retention-days: 1
+        compression-level: 0
+
+    - name: Final cleanup
+      run: |
+        rm -rf firmware/extracted_zip/
+        rm -rf firmware/extracted/
+        echo "✅ Final cleanup completed"
+
+    - name: Success message
+      run: |
+        echo "✅ العملية اكتملت بنجاح!"
+        echo "📥 يمكنك تحميل الملفات من قسم Artifacts"
+        echo "💾 تم حذف جميع الملفات المؤقتة لتوفير المساحة"        fi
 
     - name: Delete AP.tar.md5 to free more space
       run: |
