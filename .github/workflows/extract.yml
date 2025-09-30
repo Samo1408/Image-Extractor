@@ -1,4 +1,4 @@
-name: Extract Samsung Partitions / Files
+name: Extract Samsung Partitions / Files Option
 
 on:
   workflow_dispatch:
@@ -74,22 +74,28 @@ jobs:
           lz4 \
           python3 \
           e2fsprogs \
-          android-sdk-libsparse-utils
-        
-        # تحميل وتثبيت simg2img و img2simg يدوياً
-        echo "📥 Downloading simg2img tools..."
-        curl -s -O https://raw.githubusercontent.com/anestisb/android-simg2img/master/simg2img
-        curl -s -O https://raw.githubusercontent.com/anestisb/android-simg2img/master/img2simg
-        
-        chmod +x simg2img img2simg
-        sudo mv simg2img img2simg /usr/local/bin/
-        
-        echo "✅ Tools installed successfully"
+          brotli
 
-    - name: Download lpunpack.py
+    - name: Download extraction tools from your repository
       run: |
+        echo "📥 Downloading extraction tools from your repository..."
+        
+        # تحميل أدوات الاستخراج من مستودعك
+        curl -s -O https://raw.githubusercontent.com/Samo1408/Image-Extractor/main/simg2img
+        curl -s -O https://raw.githubusercontent.com/Samo1408/Image-Extractor/main/sdat2img
+        curl -s -O https://raw.githubusercontent.com/Samo1408/Image-Extractor/main/img2raw
+        curl -s -O https://raw.githubusercontent.com/Samo1408/Image-Extractor/main/brotli
         curl -s -O https://raw.githubusercontent.com/Samo1408/Image-Extractor/main/lpunpack.py
-        echo "✅ lpunpack.py downloaded"
+        
+        # منح صلاحيات التنفيذ
+        chmod +x simg2img sdat2img img2raw brotli
+        
+        # نقل إلى المسار التنفيذي
+        sudo mv simg2img sdat2img img2raw brotli /usr/local/bin/
+        
+        echo "✅ All extraction tools installed successfully"
+        echo "📋 Installed tools:"
+        ls -la /usr/local/bin/simg2img /usr/local/bin/sdat2img /usr/local/bin/img2raw /usr/local/bin/brotli
 
     - name: Download and extract firmware
       run: |
@@ -141,7 +147,7 @@ jobs:
         rm -f ap_file.tar.md5
         
         echo "📁 Files in AP.tar.md5:"
-        ls -la | grep -E "(boot|recovery|super)\\.img" || ls -la | head -15
+        ls -la | head -20
 
     - name: Handle boot.img extraction mode
       if: env.EXTRACTION_MODE == 'boot'
@@ -149,24 +155,21 @@ jobs:
         cd firmware
         
         # البحث عن boot.img
-        if [ -f "boot.img.lz4" ]; then
-          echo "✅ Found boot.img.lz4 directly"
-          BOOT_SOURCE="boot.img.lz4"
+        BOOT_SOURCE=$(find . -name "boot.img.lz4" -o -name "boot.img" -o -name "boot.img.br" | head -1)
+        if [ -n "$BOOT_SOURCE" ]; then
+          echo "✅ Found boot source: $BOOT_SOURCE"
         else
-          BOOT_SOURCE=$(find . -name "boot.img.lz4" -o -name "boot.img" | head -1)
-          if [ -n "$BOOT_SOURCE" ]; then
-            echo "✅ Found boot source: $BOOT_SOURCE"
-          else
-            echo "❌ ERROR: No boot.img found"
-            exit 1
-          fi
+          echo "❌ ERROR: No boot.img found"
+          exit 1
         fi
         
-        # فك ضغط إذا كان مضغوطاً
+        # فك الضغط بناءً على النوع
         if [[ "$BOOT_SOURCE" == *.lz4 ]]; then
           echo "🔓 Decompressing boot.img.lz4..."
           lz4 -d "$BOOT_SOURCE" boot.img
-          echo "✅ boot.img ready"
+        elif [[ "$BOOT_SOURCE" == *.br ]]; then
+          echo "🔓 Decompressing boot.img.br..."
+          brotli -d "$BOOT_SOURCE" -o boot.img
         else
           cp "$BOOT_SOURCE" boot.img
         fi
@@ -180,24 +183,21 @@ jobs:
         cd firmware
         
         # البحث عن recovery.img
-        if [ -f "recovery.img.lz4" ]; then
-          echo "✅ Found recovery.img.lz4 directly"
-          RECOVERY_SOURCE="recovery.img.lz4"
+        RECOVERY_SOURCE=$(find . -name "recovery.img.lz4" -o -name "recovery.img" -o -name "recovery.img.br" | head -1)
+        if [ -n "$RECOVERY_SOURCE" ]; then
+          echo "✅ Found recovery source: $RECOVERY_SOURCE"
         else
-          RECOVERY_SOURCE=$(find . -name "recovery.img.lz4" -o -name "recovery.img" | head -1)
-          if [ -n "$RECOVERY_SOURCE" ]; then
-            echo "✅ Found recovery source: $RECOVERY_SOURCE"
-          else
-            echo "❌ ERROR: No recovery.img found"
-            exit 1
-          fi
+          echo "❌ ERROR: No recovery.img found"
+          exit 1
         fi
         
-        # فك ضغط إذا كان مضغوطاً
+        # فك الضغط بناءً على النوع
         if [[ "$RECOVERY_SOURCE" == *.lz4 ]]; then
           echo "🔓 Decompressing recovery.img.lz4..."
           lz4 -d "$RECOVERY_SOURCE" recovery.img
-          echo "✅ recovery.img ready"
+        elif [[ "$RECOVERY_SOURCE" == *.br ]]; then
+          echo "🔓 Decompressing recovery.img.br..."
+          brotli -d "$RECOVERY_SOURCE" -o recovery.img
         else
           cp "$RECOVERY_SOURCE" recovery.img
         fi
@@ -210,33 +210,43 @@ jobs:
       run: |
         cd firmware
         
-        # البحث عن super.img.lz4
-        if [ -f "super.img.lz4" ]; then
-          echo "✅ Found super.img.lz4 directly"
+        # البحث عن super.img
+        SUPER_FILE=$(find . -name "super.img.lz4" -o -name "super.img" -o -name "super.img.br" | head -1)
+        if [ -n "$SUPER_FILE" ]; then
+          echo "✅ Found super file: $SUPER_FILE"
+          cp "$SUPER_FILE" super_source.img
         else
-          SUPER_FILE=$(find . -name "super.img.lz4" | head -1)
-          if [ -n "$SUPER_FILE" ]; then
-            cp "$SUPER_FILE" super.img.lz4
-            echo "✅ Found and copied super.img.lz4"
-          else
-            echo "❌ ERROR: No super.img.lz4 found"
-            exit 1
-          fi
+          echo "❌ ERROR: No super.img found"
+          exit 1
         fi
         
-        # فك ضغط وتحويل super.img
-        lz4 -d super.img.lz4 super.img.sparse
-        rm -f super.img.lz4
+        # فك الضغط إذا لزم الأمر
+        if [[ "$SUPER_FILE" == *.lz4 ]]; then
+          echo "🔓 Decompressing super.img.lz4..."
+          lz4 -d super_source.img super.img.sparse
+        elif [[ "$SUPER_FILE" == *.br ]]; then
+          echo "🔓 Decompressing super.img.br..."
+          brotli -d super_source.img -o super.img.sparse
+        else
+          cp super_source.img super.img.sparse
+        fi
+        
+        rm -f super_source.img
+        
+        # تحويل sparse إلى raw
+        echo "🔄 Converting sparse image to raw..."
         simg2img super.img.sparse super.img.raw
         rm -f super.img.sparse
         echo "✅ super.img.raw ready"
+        ls -lh super.img.raw
 
     - name: Extract partitions from super.img
       if: env.EXTRACTION_MODE == 'partitions' || env.EXTRACTION_MODE == 'system_files'
       run: |
         cd firmware
         mkdir -p partitions
-        python3 ../lpunpack.py super.img.raw partitions/
+        echo "🔧 Extracting partitions from super.img.raw..."
+        python3 lpunpack.py super.img.raw partitions/
         echo "📂 Partitions extracted:"
         ls -la partitions/
 
@@ -290,10 +300,11 @@ jobs:
           echo "✅ Using system.img directly"
         fi
         
-        # محاولة استخراج الملفات باستخدام debugfs (الطريقة الأساسية)
+        # استخراج الملفات باستخدام debugfs
         echo "🔧 Extracting files using debugfs..."
         FILES_TO_EXTRACT="${{ github.event.inputs.system_files_to_extract }}"
         
+        EXTRACTED_COUNT=0
         for file_path in $FILES_TO_EXTRACT; do
           echo "🔍 Attempting to extract: $file_path"
           
@@ -304,80 +315,53 @@ jobs:
           if debugfs -R "dump $file_path extracted_files/$file_path" "$SYSTEM_IMAGE" 2>/dev/null; then
             if [ -s "extracted_files/$file_path" ]; then
               echo "✅ Successfully extracted: $file_path"
-              # عرض معلومات الملف المستخرج
-              ls -lh "extracted_files/$file_path"
+              EXTRACTED_COUNT=$((EXTRACTED_COUNT + 1))
             else
               echo "⚠️ File extracted but empty: $file_path"
               rm -f "extracted_files/$file_path"
             fi
           else
-            echo "❌ Failed to extract with debugfs: $file_path"
-          fi
-        done
-
-    - name: Extract directories using alternative method
-      if: env.EXTRACTION_MODE == 'system_files'
-      run: |
-        cd firmware/partitions
-        
-        # طريقة بديلة لاستخراج المجلدات باستخدام mount
-        FILES_TO_EXTRACT="${{ github.event.inputs.system_files_to_extract }}"
-        HAS_DIRECTORIES=false
-        
-        # التحقق إذا كان هناك مجلدات مطلوبة
-        for file_path in $FILES_TO_EXTRACT; do
-          if [[ "$file_path" == *"/"* ]] && [[ ! "$file_path" =~ \. ]]; then
-            HAS_DIRECTORIES=true
-            break
+            echo "❌ Failed to extract: $file_path"
+            # محاولة استخراج كمجلد
+            if debugfs -R "ls -l $file_path" "$SYSTEM_IMAGE" 2>/dev/null | grep -q "type dir"; then
+              echo "📁 $file_path is a directory, extracting contents..."
+              mkdir -p "extracted_files/$file_path"
+              debugfs -R "ls -l $file_path" "$SYSTEM_IMAGE" | while read line; do
+                entry_name=$(echo "$line" | awk '{print $6}')
+                if [ "$entry_name" != "." ] && [ "$entry_name" != ".." ] && [ -n "$entry_name" ]; then
+                  debugfs -R "dump $file_path/$entry_name extracted_files/$file_path/$entry_name" "$SYSTEM_IMAGE" 2>/dev/null && \
+                  echo "  ✅ Extracted: $file_path/$entry_name" && \
+                  EXTRACTED_COUNT=$((EXTRACTED_COUNT + 1))
+                fi
+              done
+            fi
           fi
         done
         
-        if [ "$HAS_DIRECTORIES" = true ] && [ -f "system.raw" ]; then
-          echo "📁 Attempting to extract directories using mount..."
-          
-          mkdir -p system_mount
-          sudo mount -o ro,loop system.raw system_mount 2>/dev/null || true
-          
-          if mountpoint -q system_mount; then
-            echo "✅ System mounted successfully for directory extraction"
-            
-            for file_path in $FILES_TO_EXTRACT; do
-              if [ -d "system_mount/$file_path" ] && [ ! -e "extracted_files/$file_path" ]; then
-                echo "📁 Copying directory: $file_path"
-                mkdir -p "extracted_files/$(dirname "$file_path")"
-                cp -r "system_mount/$file_path" "extracted_files/$(dirname "$file_path")/" 2>/dev/null || true
-              fi
-            done
-            
-            sudo umount system_mount
-            echo "✅ Directory extraction completed"
-          else
-            echo "⚠️ Could not mount system for directory extraction"
-          fi
-          
-          rm -rf system_mount
-        fi
+        echo "📊 Total files extracted: $EXTRACTED_COUNT"
 
     - name: Verify extracted files
       if: env.EXTRACTION_MODE == 'system_files'
       run: |
-        cd firmware/partinations/extracted_files
+        cd firmware/partitions/extracted_files
         
         echo "📋 Verifying extracted files:"
-        find . -type f | head -20
+        find . -type f | head -30 || echo "No files found"
         
-        TOTAL_FILES=$(find . -type f | wc -l)
+        TOTAL_FILES=$(find . -type f 2>/dev/null | wc -l || echo "0")
         echo "📊 Total files extracted: $TOTAL_FILES"
         
         if [ "$TOTAL_FILES" -eq 0 ]; then
           echo "❌ ERROR: No files were extracted"
+          echo "🔍 Available partitions:"
+          ls -la ../*.img
           exit 1
         fi
         
         # عرض محتوى build.prop إذا تم استخراجه
         if [ -f "build.prop" ]; then
           echo "📄 build.prop content (first 10 lines):"
-          head -10 build.prop
+          head -10 build.prop || echo "Could not read build.prop"
         fi
 
     - name: Compress files based on mode
@@ -416,10 +400,15 @@ jobs:
           "system_files")
             echo "📦 Handling system files mode..."
             cd partitions/extracted_files
-            tar -czf ../../output/system_files.tar.gz .
-            echo "📁 System files packaged"
-            ls -lh ../../output/system_files.tar.gz
-            ARTIFACT_NAME="system-files"
+            if find . -type f | read; then
+              tar -czf ../../output/system_files.tar.gz .
+              echo "📁 System files packaged"
+              ls -lh ../../output/system_files.tar.gz
+              ARTIFACT_NAME="system-files"
+            else
+              echo "❌ No files to package in system_files mode"
+              exit 1
+            fi
             ;;
         esac
         
@@ -468,6 +457,8 @@ jobs:
           \`\`\`bash
           tar -xzf ${{ env.ARTIFACT_NAME }}-${{ env.FINAL_TAG }}.tar.gz
           \`\`\`
+          
+          ## 🛠️ تم باستخدام أدوات Samo1408/Image-Extractor
         draft: false
         prerelease: false
 
@@ -512,3 +503,4 @@ jobs:
         echo "📁 الملفات: $ARTIFACT_NAME"
         echo "🏷️ الوسم: $FINAL_TAG"
         echo "📎 الرابط: https://github.com/$GITHUB_REPOSITORY/releases/tag/$FINAL_TAG"
+        echo "🛠️ تم باستخدام أدوات Samo1408/Image-Extractor"
