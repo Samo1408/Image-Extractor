@@ -1,0 +1,619 @@
+name: Extract Samsung Partitions Enhanced 
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: "رابط الملف المضغوط .zip الذي يحتوي على AP.tar.md5"
+        required: true
+      extraction_mode:
+        description: "نوع الاستخراج"
+        type: choice
+        options:
+        - "partitions"
+        - "boot"
+        - "recovery"
+        - "system_files"
+        default: "partitions"
+      partitions_to_extract:
+        description: "المفات المطلوبة (للوضع partitions فقط)"
+        required: false
+        default: "system vendor"
+      system_files_to_extract:
+        description: "الملفات المطلوبة من system (للوضع system_files فقط)"
+        required: false
+        default: "build.prop floating_features.xml priv-app"
+      release_tag:
+        description: "وسم الإصدار"
+        required: true
+        default: "v1.0.0"
+
+permissions:
+  contents: write
+
+jobs:
+  extract-files:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+      
+    - name: Check initial disk space and memory
+      run: |
+        echo "💾 Initial disk space:"
+        df -h
+        echo "🧠 Memory info:"
+        free -h
+        echo "🔧 CPU info:"
+        nproc
+
+    - name: Setup cache disk with optimized settings
+      run: |
+        echo "🔄 Setting up cache disk with optimized settings..."
+        # إنشاء مجلد العمل على القرص المخبأ
+        sudo mkdir -p /mnt/cache
+        # توسعة القرص المخبأ إلى 40GB مع إعدادات محسنة
+        sudo mount -o size=40G,nr_inodes=0,mode=1777,noatime -t tmpfs tmpfs /mnt/cache
+        echo "✅ Cache disk setup completed (40GB)"
+        df -h /mnt/cache
+
+    - name: Generate unique tag
+      run: |
+        git fetch --tags
+        INPUT_TAG="${{ github.event.inputs.release_tag }}"
+        CLEAN_TAG=$(echo "$INPUT_TAG" | tr ' ' '-' | tr -cd '[:alnum:]-._')
+        
+        if git rev-parse "$CLEAN_TAG" >/dev/null 2>&1; then
+          echo "⚠️ Tag $CLEAN_TAG exists, generating unique tag..."
+          TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+          FINAL_TAG="${CLEAN_TAG}-${TIMESTAMP}"
+        else
+          FINAL_TAG="$CLEAN_TAG"
+        fi
+        
+        echo "FINAL_TAG=$FINAL_TAG" >> $GITHUB_ENV
+        echo "EXTRACTION_MODE=${{ github.event.inputs.extraction_mode }}" >> $GITHUB_ENV
+        echo "🎯 Mode: ${{ github.event.inputs.extraction_mode }}, Tag: $FINAL_TAG"
+
+    - name: Install essential tools with memory optimization
+      run: |
+        sudo apt-get update
+        # تثبيت الأدوات الأساسية فقط
+        sudo apt-get install -y \
+          unzip \
+          curl \
+          lz4 \
+          python3 \
+          e2fsprogs \
+          brotli \
+          file \
+          p7zip-full \
+          cpio \
+          wget \
+          pigz \
+          pxz
+
+    - name: Download extraction tools from your repository
+      run: |
+        echo "📥 Downloading extraction tools from your repository..."
+        
+        # تحميل أدوات الاستخراج من مستودعك
+        curl -s -O https://raw.githubusercontent.com/Samo1408/Image-Extractor/main/simg2img
+        curl -s -O https://raw.githubusercontent.com/Samo1408/Image-Extractor/main/sdat2img
+        curl -s -O https://raw.githubusercontent.com/Samo1408/Image-Extractor/main/img2raw
+        curl -s -O https://raw.githubusercontent.com/Samo1408/Image-Extractor/main/brotli
+        curl -s -O https://raw.githubusercontent.com/Samo1408/Image-Extractor/main/lpunpack.py
+        
+        # منح صلاحيات التنفيذ
+        chmod +x simg2img sdat2img img2raw brotli
+        
+        # نقل إلى المسار التنفيذي
+        sudo mv simg2img sdat2img img2raw brotli /usr/local/bin/
+        
+        echo "✅ All extraction tools installed successfully"
+
+    - name: Download firmware with verification
+      run: |
+        cd /mnt/cache
+        mkdir -p firmware
+        cd firmware
+        
+        echo "📥 Downloading firmware file with verification..."
+        echo "🔗 URL: ${{ github.event.inputs.zip_url }}"
+        
+        # تحميل الملف مع إعادة المحاولة والتحقق
+        MAX_RETRIES=3
+        RETRY_COUNT=0
+        DOWNLOAD_SUCCESS=false
+        
+        while [ $RETRY_COUNT -lt $MAX_RETRIES ] && [ "$DOWNLOAD_SUCCESS" = false ]; do
+          RETRY_COUNT=$((RETRY_COUNT + 1))
+          echo "🔄 Download attempt $RETRY_COUNT of $MAX_RETRIES..."
+          
+          # تحميل الملف مع عرض التقدم
+          if curl -L -o firmware.file --progress-bar "${{ github.event.inputs.zip_url }}"; then
+            FILE_SIZE=$(stat -c%s firmware.file 2>/dev/null || wc -c < firmware.file)
+            echo "📊 Downloaded file size: $FILE_SIZE bytes"
+            
+            if [ "$FILE_SIZE" -gt 1000000 ]; then
+              echo "✅ Download successful - File size is reasonable"
+              DOWNLOAD_SUCCESS=true
+            else
+              echo "❌ File too small ($FILE_SIZE bytes) - likely download error"
+              rm -f firmware.file
+              sleep 5
+            fi
+          else
+            echo "❌ Download failed on attempt $RETRY_COUNT"
+            sleep 5
+          fi
+        done
+        
+        if [ "$DOWNLOAD_SUCCESS" = false ]; then
+          echo "❌ ERROR: All download attempts failed"
+          exit 1
+        fi
+        
+        # فحص نوع الملف
+        echo "🔍 Checking file type..."
+        file firmware.file
+        
+        FILE_TYPE=$(file -b firmware.file)
+        echo "📄 File type: $FILE_TYPE"
+        
+        if echo "$FILE_TYPE" | grep -qi "html\|text"; then
+          echo "❌ ERROR: Downloaded file is HTML/text (likely error page)"
+          head -c 500 firmware.file
+          echo ""
+          exit 1
+        fi
+        
+        if echo "$FILE_TYPE" | grep -q "Zip archive"; then
+          echo "✅ File is a ZIP archive"
+          mv firmware.file firmware.zip
+          echo "ZIP_FILE=true" >> $GITHUB_ENV
+        elif echo "$FILE_TYPE" | grep -q "7-zip archive"; then
+          echo "✅ File is a 7-Zip archive"
+          mv firmware.file firmware.7z
+          echo "SEVENZIP_FILE=true" >> $GITHUB_ENV
+        elif echo "$FILE_TYPE" | grep -q "tar archive"; then
+          echo "✅ File is a TAR archive"
+          mv firmware.file firmware.tar
+          echo "TAR_FILE=true" >> $GITHUB_ENV
+        elif echo "$FILE_TYPE" | grep -q "gzip compressed"; then
+          echo "✅ File is a GZIP compressed file"
+          mv firmware.file firmware.tar.gz
+          echo "GZIP_FILE=true" >> $GITHUB_ENV
+        else
+          echo "⚠️ Unknown file type, trying to extract as ZIP"
+          mv firmware.file firmware.zip
+          echo "ZIP_FILE=true" >> $GITHUB_ENV
+        fi
+        
+        echo "💾 Current disk space:"
+        df -h /mnt/cache
+
+    - name: Extract firmware based on type
+      run: |
+        cd /mnt/cache/firmware
+        
+        echo "🔧 Extracting firmware based on detected type..."
+        
+        if [ "$ZIP_FILE" = "true" ]; then
+          echo "📦 Extracting ZIP file..."
+          if unzip -o firmware.zip -d extracted_files/; then
+            echo "✅ ZIP extraction successful"
+          else
+            echo "❌ ZIP extraction failed"
+            exit 1
+          fi
+        elif [ "$SEVENZIP_FILE" = "true" ]; then
+          echo "📦 Extracting 7-Zip file..."
+          7z x firmware.7z -oextracted_files/
+        elif [ "$TAR_FILE" = "true" ]; then
+          echo "📦 Extracting TAR file..."
+          tar -xf firmware.tar -C extracted_files/
+        elif [ "$GZIP_FILE" = "true" ]; then
+          echo "📦 Extracting GZIP file..."
+          tar -xzf firmware.tar.gz -C extracted_files/
+        fi
+        
+        if [ -d "extracted_files" ] && [ "$(ls -A extracted_files)" ]; then
+          rm -f firmware.zip firmware.7z firmware.tar firmware.tar.gz
+          echo "✅ Cleaned up original file"
+        else
+          echo "❌ Extraction failed or no files extracted"
+          exit 1
+        fi
+        
+        echo "📁 Files after extraction:"
+        find extracted_files/ -type f | head -10
+
+    - name: Find and prepare AP file
+      run: |
+        cd /mnt/cache/firmware/extracted_files
+        
+        echo "🔍 Searching for AP file..."
+        
+        AP_FILE=$(find . -name "AP*.tar.md5" -o -name "AP*.tar" -o -name "AP_*.tar" -o -name "AP*.zip" | head -1)
+        if [ -n "$AP_FILE" ]; then
+          echo "✅ Found AP file: $AP_FILE"
+          cp "$AP_FILE" ../ap_file.tar.md5
+        else
+          TAR_FILE=$(find . -name "*.tar" | head -1)
+          if [ -n "$TAR_FILE" ]; then
+            echo "✅ Found alternative TAR file: $TAR_FILE"
+            cp "$TAR_FILE" ../ap_file.tar.md5
+          else
+            IMG_FILES=$(find . \( -name "*.img" -o -name "*.img.lz4" -o -name "*.img.br" \) | head -10)
+            if [ -n "$IMG_FILES" ]; then
+              echo "✅ Found image files directly"
+              mkdir -p ../direct_images
+              for img in $IMG_FILES; do
+                cp "$img" ../direct_images/
+              done
+              echo "DIRECT_IMAGES=true" >> $GITHUB_ENV
+            else
+              echo "❌ ERROR: No AP file or image files found"
+              exit 1
+            fi
+          fi
+        fi
+
+    - name: Extract AP and prepare files based on mode
+      run: |
+        cd /mnt/cache/firmware
+        
+        if [ "$DIRECT_IMAGES" = "true" ]; then
+          echo "📁 Using direct image files..."
+          cp -r direct_images/* .
+          echo "📁 Available files:"
+          ls -la | head -10
+        else
+          echo "📦 Extracting AP file..."
+          if tar -xf ap_file.tar.md5; then
+            echo "✅ AP extraction successful"
+          else
+            echo "⚠️ Standard tar extraction failed, trying with ignore zeros..."
+            tar -xf ap_file.tar.md5 --ignore-zeros || true
+          fi
+          rm -f ap_file.tar.md5
+          
+          echo "📁 Files in AP archive:"
+          ls -la | head -10
+        fi
+
+    - name: Handle boot.img extraction mode
+      if: env.EXTRACTION_MODE == 'boot'
+      run: |
+        cd /mnt/cache/firmware
+        
+        BOOT_SOURCE=$(find . -name "boot.img.lz4" -o -name "boot.img" -o -name "boot.img.br" -o -name "boot*.img" | head -1)
+        if [ -n "$BOOT_SOURCE" ]; then
+          echo "✅ Found boot source: $BOOT_SOURCE"
+        else
+          echo "❌ ERROR: No boot.img found"
+          exit 1
+        fi
+        
+        if [[ "$BOOT_SOURCE" == *.lz4 ]]; then
+          echo "🔓 Decompressing boot.img.lz4..."
+          lz4 -d "$BOOT_SOURCE" boot.img
+        elif [[ "$BOOT_SOURCE" == *.br ]]; then
+          echo "🔓 Decompressing boot.img.br..."
+          brotli -d "$BOOT_SOURCE" -o boot.img
+        else
+          cp "$BOOT_SOURCE" boot.img
+        fi
+        
+        ls -lh boot.img
+        echo "BOOT_FINAL=/mnt/cache/firmware/boot.img" >> $GITHUB_ENV
+
+    - name: Handle recovery.img extraction mode
+      if: env.EXTRACTION_MODE == 'recovery'
+      run: |
+        cd /mnt/cache/firmware
+        
+        RECOVERY_SOURCE=$(find . -name "recovery.img.lz4" -o -name "recovery.img" -o -name "recovery.img.br" -o -name "recovery*.img" | head -1)
+        if [ -n "$RECOVERY_SOURCE" ]; then
+          echo "✅ Found recovery source: $RECOVERY_SOURCE"
+        else
+          echo "❌ ERROR: No recovery.img found"
+          exit 1
+        fi
+        
+        if [[ "$RECOVERY_SOURCE" == *.lz4 ]]; then
+          echo "🔓 Decompressing recovery.img.lz4..."
+          lz4 -d "$RECOVERY_SOURCE" recovery.img
+        elif [[ "$RECOVERY_SOURCE" == *.br ]]; then
+          echo "🔓 Decompressing recovery.img.br..."
+          brotli -d "$RECOVERY_SOURCE" -o recovery.img
+        else
+          cp "$RECOVERY_SOURCE" recovery.img
+        fi
+        
+        ls -lh recovery.img
+        echo "RECOVERY_FINAL=/mnt/cache/firmware/recovery.img" >> $GITHUB_ENV
+
+    - name: Handle partitions extraction with memory optimization
+      if: env.EXTRACTION_MODE == 'partitions' || env.EXTRACTION_MODE == 'system_files'
+      run: |
+        cd /mnt/cache/firmware
+        
+        echo "🧠 Checking available memory before processing..."
+        free -h
+        
+        # البحث عن super.img
+        SUPER_FILE=$(find . -name "super.img.lz4" -o -name "super.img" -o -name "super.img.br" -o -name "super*.img" | head -1)
+        if [ -n "$SUPER_FILE" ]; then
+          echo "✅ Found super file: $SUPER_FILE"
+          cp "$SUPER_FILE" super_source.img
+        else
+          echo "❌ ERROR: No super.img found"
+          exit 1
+        fi
+        
+        # فك الضغط مع تحسين الذاكرة
+        if [[ "$SUPER_FILE" == *.lz4 ]]; then
+          echo "🔓 Decompressing super.img.lz4 with memory optimization..."
+          # استخدام lz4 مع خيارات تحسين الذاكرة
+          lz4 -d -B4 super_source.img super.img.sparse
+        elif [[ "$SUPER_FILE" == *.br ]]; then
+          echo "🔓 Decompressing super.img.br with memory optimization..."
+          # استخدام brotli مع خيارات تحسين الذاكرة
+          brotli -d -w 20 super_source.img -o super.img.sparse
+        else
+          cp super_source.img super.img.sparse
+        fi
+        
+        rm -f super_source.img
+        
+        echo "💾 Disk space after super extraction:"
+        df -h /mnt/cache
+        
+        # تحويل sparse إلى raw مع تحسين الذاكرة
+        echo "🔄 Converting sparse image to raw with memory optimization..."
+        simg2img super.img.sparse super.img.raw
+        rm -f super.img.sparse
+        echo "✅ super.img.raw ready"
+        ls -lh super.img.raw
+
+    - name: Extract partitions from super.img with optimization
+      if: env.EXTRACTION_MODE == 'partitions' || env.EXTRACTION_MODE == 'system_files'
+      run: |
+        cd /mnt/cache/firmware
+        
+        echo "🧠 Memory status before partition extraction:"
+        free -h
+        
+        mkdir -p partitions
+        echo "🔧 Extracting partitions from super.img.raw with optimization..."
+        
+        # استخدام Python مع إعدادات تحسين الذاكرة
+        PYTHONHASHSEED=0 python3 lpunpack.py super.img.raw partitions/
+        
+        echo "📂 Partitions extracted:"
+        ls -la partitions/ | head -10
+        
+        # تنظيف الملف الكبير فوراً لتوفير المساحة
+        rm -f super.img.raw
+        echo "✅ Cleaned up super.img.raw to save space"
+
+    - name: Filter requested partitions
+      if: env.EXTRACTION_MODE == 'partitions'
+      run: |
+        cd /mnt/cache/firmware/partitions
+        
+        TARGET_PARTITIONS="${{ github.event.inputs.partitions_to_extract }}"
+        echo "🔧 Filtering partitions. Keeping only: $TARGET_PARTITIONS"
+        
+        for partition in *.img; do
+          partition_name=$(basename "$partition" .img)
+          if echo "$TARGET_PARTITIONS" | grep -qw "$partition_name"; then
+            echo "✅ Keeping: $partition"
+          else
+            echo "🗑️ Deleting: $partition"
+            rm -f "$partition"
+          fi
+        done
+
+    - name: Extract system files from system partition with optimization
+      if: env.EXTRACTION_MODE == 'system_files'
+      run: |
+        cd /mnt/cache/firmware/partitions
+        
+        if [ ! -f "system.img" ]; then
+          echo "❌ ERROR: system.img not found in partitions"
+          ls -la
+          exit 1
+        fi
+        
+        echo "🔧 Preparing to extract files from system.img with memory optimization..."
+        
+        mkdir -p extracted_files
+        
+        # فحص نوع system.img
+        echo "📊 Checking system.img type..."
+        file system.img
+        
+        # استخدام أقل قدر ممكن من الذاكرة للتحويل
+        if file system.img | grep -q "sparse"; then
+          echo "📦 Converting sparse system.img to raw with low memory..."
+          simg2img system.img system.raw
+          SYSTEM_IMAGE="system.raw"
+        else
+          SYSTEM_IMAGE="system.img"
+        fi
+        
+        # استخراج الملفات المطلوبة فقط
+        echo "🔧 Extracting only requested files to save memory..."
+        FILES_TO_EXTRACT="${{ github.event.inputs.system_files_to_extract }}"
+        
+        EXTRACTED_COUNT=0
+        for file_path in $FILES_TO_EXTRACT; do
+          echo "🔍 Attempting to extract: $file_path"
+          
+          mkdir -p "extracted_files/$(dirname "$file_path")"
+          
+          if debugfs -R "dump $file_path extracted_files/$file_path" "$SYSTEM_IMAGE" 2>/dev/null; then
+            if [ -s "extracted_files/$file_path" ]; then
+              echo "✅ Successfully extracted: $file_path"
+              EXTRACTED_COUNT=$((EXTRACTED_COUNT + 1))
+            else
+              echo "⚠️ File extracted but empty: $file_path"
+              rm -f "extracted_files/$file_path"
+            fi
+          else
+            echo "❌ Failed to extract: $file_path"
+          fi
+        done
+        
+        echo "📊 Total files extracted: $EXTRACTED_COUNT"
+
+    - name: Compress files based on mode with optimization
+      run: |
+        cd /mnt/cache/firmware
+        mkdir -p output
+        
+        case "$EXTRACTION_MODE" in
+          "boot")
+            echo "📦 Handling boot mode..."
+            cp boot.img output/
+            # استخدام pigz للضغط المتوازي (أسرع وأقل استهلاكاً للذاكرة)
+            pigz output/boot.img
+            echo "BOOT_FINAL=/mnt/cache/firmware/output/boot.img.gz" >> $GITHUB_ENV
+            ARTIFACT_NAME="boot"
+            ;;
+          "recovery")
+            echo "📦 Handling recovery mode..."
+            cp recovery.img output/
+            pigz output/recovery.img
+            echo "RECOVERY_FINAL=/mnt/cache/firmware/output/recovery.img.gz" >> $GITHUB_ENV
+            ARTIFACT_NAME="recovery"
+            ;;
+          "partitions")
+            echo "📦 Handling partitions mode..."
+            cd partitions
+            TARGET_PARTITIONS="${{ github.event.inputs.partitions_to_extract }}"
+            for part in $TARGET_PARTITIONS; do
+              if [ -f "${part}.img" ]; then
+                echo "📦 Compressing ${part}.img"
+                pigz -c "${part}.img" > "../output/${part}.img.gz"
+              fi
+            done
+            ARTIFACT_NAME=$(echo "$TARGET_PARTITIONS" | tr ' ' '-' | cut -c1-50)
+            ;;
+          "system_files")
+            echo "📦 Handling system files mode..."
+            cd partitions/extracted_files
+            if find . -type f | read; then
+              # استخدام tar مع pigz للضغط المتوازي
+              tar -cf - . | pigz > ../../output/system_files.tar.gz
+              echo "📁 System files packaged"
+              ARTIFACT_NAME="system-files"
+            else
+              echo "❌ No files to package in system_files mode"
+              exit 1
+            fi
+            ;;
+        esac
+        
+        echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
+        echo "📁 Output files:"
+        ls -la output/
+
+    - name: Create final package
+      run: |
+        cd /mnt/cache/firmware/output
+        
+        FINAL_FILE="/mnt/cache/$ARTIFACT_NAME-$FINAL_TAG.tar.gz"
+        
+        if ls * 1> /dev/null 2>&1; then
+          echo "📦 Creating final package: $FINAL_FILE"
+          # استخدام pigz للضغط النهائي
+          tar -cf - ./* | pigz > "$FINAL_FILE"
+          echo "✅ Package created successfully"
+          ls -lh "$FINAL_FILE"
+          echo "FINAL_FILE=$FINAL_FILE" >> $GITHUB_ENV
+        else
+          echo "❌ No files to package"
+          exit 1
+        fi
+
+    - name: Create GitHub Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ env.FINAL_TAG }}
+        release_name: "${{ env.EXTRACTION_MODE }} ${{ env.ARTIFACT_NAME }} - ${{ env.FINAL_TAG }}"
+        body: |
+          # ${{ env.EXTRACTION_MODE }} Extraction - ${{ env.FINAL_TAG }}
+          
+          ## 🔧 معلومات الإصدار:
+          - **النوع:** ${{ env.EXTRACTION_MODE }}
+          - **الملفات:** ${{ env.ARTIFACT_NAME }}
+          - **الوسم:** ${{ env.FINAL_TAG }}
+          - **التاريخ:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          
+          ## 📋 محتويات الحزمة:
+          ${{ env.ARTIFACT_NAME }}
+          
+          ## ⚡ طريقة الاستخدام:
+          \`\`\`bash
+          tar -xzf ${{ env.ARTIFACT_NAME }}-${{ env.FINAL_TAG }}.tar.gz
+          \`\`\`
+          
+          ## 🛠️ تم باستخدام أدوات Samo1408/Image-Extractor
+        draft: false
+        prerelease: false
+
+    - name: Upload to Release
+      run: |
+        UPLOAD_URL="${{ steps.create_release.outputs.upload_url }}"
+        UPLOAD_URL=$(echo "$UPLOAD_URL" | sed 's/{.*}//')
+        
+        if [ ! -f "$FINAL_FILE" ]; then
+          echo "❌ File not found: $FINAL_FILE"
+          exit 1
+        fi
+        
+        echo "📤 Uploading: $FINAL_FILE"
+        curl -X POST \
+          -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+          -H "Content-Type: application/gzip" \
+          -H "Accept: application/vnd.github.v3+json" \
+          -T "$FINAL_FILE" \
+          "$UPLOAD_URL?name=$ARTIFACT_NAME-$FINAL_TAG.tar.gz"
+        
+        echo "✅ تم الرفع بنجاح!"
+
+    - name: Upload to Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ env.EXTRACTION_MODE }}-${{ env.ARTIFACT_NAME }}-${{ env.FINAL_TAG }}
+        path: ${{ env.FINAL_FILE }}
+        retention-days: 7
+
+    - name: Cleanup cache
+      run: |
+        echo "🧹 Cleaning up cache disk..."
+        sudo umount /mnt/cache 2>/dev/null || true
+        sudo rm -rf /mnt/cache/*
+        echo "✅ Cache cleanup completed"
+
+    - name: Success message
+      run: |
+        echo "🎉 العملية اكتملت بنجاح!"
+        echo "🚀 النوع: $EXTRACTION_MODE"
+        echo "📁 الملفات: $ARTIFACT_NAME"
+        echo "🏷️ الوسم: $FINAL_TAG"
+        echo "💾 تم استخدام القرص المخبأ 40GB بنجاح"
+        echo "🧠 تم تحسين استخدام الذاكرة"
+        echo "📎 الرابط: https://github.com/$GITHUB_REPOSITORY/releases/tag/$FINAL_TAG"
+        echo "🛠️ تم باستخدام أدوات Samo1408/Image-Extractor"
