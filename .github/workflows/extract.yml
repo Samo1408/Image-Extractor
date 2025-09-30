@@ -1,4 +1,4 @@
-name: Extract Samsung Partitions with / Files Option
+name: Extract Samsung Partitions / Files Option
 
 on:
   workflow_dispatch:
@@ -84,7 +84,10 @@ jobs:
           lz4 \
           python3 \
           e2fsprogs \
-          brotli
+          brotli \
+          file \
+          p7zip-full \
+          cpio
 
     - name: Download extraction tools from your repository
       run: |
@@ -107,64 +110,148 @@ jobs:
         echo "📋 Installed tools:"
         ls -la /usr/local/bin/simg2img /usr/local/bin/sdat2img /usr/local/bin/img2raw /usr/local/bin/brotli
 
-    - name: Download and extract firmware to cache
+    - name: Download firmware to cache
       run: |
         # الانتقال إلى القرص المخبأ
         cd /mnt/cache
         mkdir -p firmware
         cd firmware
-        curl -L -o firmware.zip "${{ github.event.inputs.zip_url }}"
+        echo "📥 Downloading firmware file..."
+        curl -L -o firmware.file "${{ github.event.inputs.zip_url }}"
         echo "📦 Downloaded file to cache disk"
-        ls -lh firmware.zip
+        ls -lh firmware.file
+        
+        # فحص نوع الملف
+        echo "🔍 Checking file type..."
+        file firmware.file
+        
+        # تحديد نوع الملف واتخاذ الإجراء المناسب
+        FILE_TYPE=$(file -b firmware.file)
+        echo "📄 File type: $FILE_TYPE"
+        
+        if echo "$FILE_TYPE" | grep -q "Zip archive"; then
+          echo "✅ File is a ZIP archive"
+          mv firmware.file firmware.zip
+          echo "ZIP_FILE=true" >> $GITHUB_ENV
+        elif echo "$FILE_TYPE" | grep -q "7-zip archive"; then
+          echo "✅ File is a 7-Zip archive"
+          mv firmware.file firmware.7z
+          echo "SEVENZIP_FILE=true" >> $GITHUB_ENV
+        elif echo "$FILE_TYPE" | grep -q "tar archive"; then
+          echo "✅ File is a TAR archive"
+          mv firmware.file firmware.tar
+          echo "TAR_FILE=true" >> $GITHUB_ENV
+        elif echo "$FILE_TYPE" | grep -q "gzip compressed"; then
+          echo "✅ File is a GZIP compressed file"
+          mv firmware.file firmware.tar.gz
+          echo "GZIP_FILE=true" >> $GITHUB_ENV
+        else
+          echo "⚠️ Unknown file type, trying to extract as ZIP anyway"
+          mv firmware.file firmware.zip
+          echo "ZIP_FILE=true" >> $GITHUB_ENV
+        fi
+        
         echo "💾 Current disk space:"
         df -h /mnt/cache
 
-    - name: Extract ZIP and find files
+    - name: Extract firmware based on type
       run: |
         cd /mnt/cache/firmware
-        unzip -o firmware.zip -d extracted_zip/
-        rm -f firmware.zip
         
-        echo "📁 Files in ZIP:"
-        find extracted_zip/ -type f -name "*.tar.md5" | head -10
+        echo "🔧 Extracting firmware based on detected type..."
         
-        # البحث عن ملف AP
-        AP_FILE=$(find extracted_zip/ -name "AP*.tar.md5" | head -1)
-        if [ -n "$AP_FILE" ]; then
-          cp "$AP_FILE" ap_file.tar.md5
-          echo "✅ Found AP file: $AP_FILE"
+        if [ "$ZIP_FILE" = "true" ]; then
+          echo "📦 Extracting ZIP file..."
+          if unzip -o firmware.zip -d extracted_files/; then
+            echo "✅ ZIP extraction successful"
+          else
+            echo "❌ ZIP extraction failed, trying 7zip..."
+            7z x firmware.zip -oextracted_files/
+          fi
+        elif [ "$SEVENZIP_FILE" = "true" ]; then
+          echo "📦 Extracting 7-Zip file..."
+          7z x firmware.7z -oextracted_files/
+        elif [ "$TAR_FILE" = "true" ]; then
+          echo "📦 Extracting TAR file..."
+          tar -xf firmware.tar -C extracted_files/
+        elif [ "$GZIP_FILE" = "true" ]; then
+          echo "📦 Extracting GZIP file..."
+          tar -xzf firmware.tar.gz -C extracted_files/
         else
-          echo "❌ ERROR: No AP file found"
+          echo "❌ No supported archive type detected"
           exit 1
         fi
         
-        # البحث عن ملفات boot و recovery مباشرة في ZIP
-        BOOT_FILE=$(find extracted_zip/ -name "boot.img*" | head -1)
-        RECOVERY_FILE=$(find extracted_zip/ -name "recovery.img*" | head -1)
+        # تنظيف الملف الأصلي بعد الاستخراج
+        rm -f firmware.zip firmware.7z firmware.tar firmware.tar.gz
         
-        if [ -n "$BOOT_FILE" ]; then
-          echo "✅ Found boot file: $BOOT_FILE"
-          echo "BOOT_FILE=$BOOT_FILE" >> $GITHUB_ENV
-        fi
-        
-        if [ -n "$RECOVERY_FILE" ]; then
-          echo "✅ Found recovery file: $RECOVERY_FILE"
-          echo "RECOVERY_FILE=$RECOVERY_FILE" >> $GITHUB_ENV
-        fi
+        echo "📁 Files after extraction:"
+        find extracted_files/ -type f | head -20
         
         echo "💾 Disk space after extraction:"
         df -h /mnt/cache
+
+    - name: Find and prepare AP file
+      run: |
+        cd /mnt/cache/firmware/extracted_files
+        
+        echo "🔍 Searching for AP file..."
+        
+        # البحث عن ملف AP بأشكاله المختلفة
+        AP_FILE=$(find . -name "AP*.tar.md5" -o -name "AP*.tar" -o -name "AP_*.tar" | head -1)
+        if [ -n "$AP_FILE" ]; then
+          echo "✅ Found AP file: $AP_FILE"
+          cp "$AP_FILE" ../ap_file.tar.md5
+        else
+          # إذا لم يتم العثور على AP، قد يكون الملف مضغوطاً بشكل مختلف
+          echo "⚠️ No standard AP file found, checking for alternative structures..."
+          
+          # البحث عن أي ملف tar قد يحتوي على الصور
+          TAR_FILE=$(find . -name "*.tar" | head -1)
+          if [ -n "$TAR_FILE" ]; then
+            echo "✅ Found alternative TAR file: $TAR_FILE"
+            cp "$TAR_FILE" ../ap_file.tar.md5
+          else
+            # البحث مباشرة عن ملفات الصور
+            echo "🔍 Searching for image files directly..."
+            find . -name "*.img" -o -name "*.img.lz4" -o -name "*.img.br" | head -10
+            
+            # إذا وجدنا ملفات الصور مباشرة، ننشئ هيكل محاكاة
+            IMG_FILES=$(find . -name "*.img" -o -name "*.img.lz4" -o -name "*.img.br" | head -5)
+            if [ -n "$IMG_FILES" ]; then
+              echo "✅ Found image files directly, creating working directory..."
+              mkdir -p ../direct_images
+              for img in $IMG_FILES; do
+                cp "$img" ../direct_images/
+              done
+              echo "DIRECT_IMAGES=true" >> $GITHUB_ENV
+            else
+              echo "❌ ERROR: No AP file or image files found"
+              find . -type f | head -20
+              exit 1
+            fi
+          fi
+        fi
 
     - name: Extract AP and prepare files based on mode
       run: |
         cd /mnt/cache/firmware
         
-        # استخراج AP.tar.md5
-        tar -xf ap_file.tar.md5
-        rm -f ap_file.tar.md5
+        if [ "$DIRECT_IMAGES" = "true" ]; then
+          echo "📁 Using direct image files..."
+          cp -r direct_images/* .
+          echo "📁 Available files:"
+          ls -la | head -20
+        else
+          # استخراج AP.tar.md5
+          echo "📦 Extracting AP file..."
+          tar -xf ap_file.tar.md5 || tar -xf ap_file.tar.md5 --ignore-zeros
+          rm -f ap_file.tar.md5
+          
+          echo "📁 Files in AP archive:"
+          ls -la | head -20
+        fi
         
-        echo "📁 Files in AP.tar.md5:"
-        ls -la | head -20
         echo "💾 Disk space after AP extraction:"
         df -h /mnt/cache
 
@@ -174,7 +261,7 @@ jobs:
         cd /mnt/cache/firmware
         
         # البحث عن boot.img
-        BOOT_SOURCE=$(find . -name "boot.img.lz4" -o -name "boot.img" -o -name "boot.img.br" | head -1)
+        BOOT_SOURCE=$(find . -name "boot.img.lz4" -o -name "boot.img" -o -name "boot.img.br" -o -name "boot*.img" | head -1)
         if [ -n "$BOOT_SOURCE" ]; then
           echo "✅ Found boot source: $BOOT_SOURCE"
         else
@@ -202,7 +289,7 @@ jobs:
         cd /mnt/cache/firmware
         
         # البحث عن recovery.img
-        RECOVERY_SOURCE=$(find . -name "recovery.img.lz4" -o -name "recovery.img" -o -name "recovery.img.br" | head -1)
+        RECOVERY_SOURCE=$(find . -name "recovery.img.lz4" -o -name "recovery.img" -o -name "recovery.img.br" -o -name "recovery*.img" | head -1)
         if [ -n "$RECOVERY_SOURCE" ]; then
           echo "✅ Found recovery source: $RECOVERY_SOURCE"
         else
@@ -230,12 +317,14 @@ jobs:
         cd /mnt/cache/firmware
         
         # البحث عن super.img
-        SUPER_FILE=$(find . -name "super.img.lz4" -o -name "super.img" -o -name "super.img.br" | head -1)
+        SUPER_FILE=$(find . -name "super.img.lz4" -o -name "super.img" -o -name "super.img.br" -o -name "super*.img" | head -1)
         if [ -n "$SUPER_FILE" ]; then
           echo "✅ Found super file: $SUPER_FILE"
           cp "$SUPER_FILE" super_source.img
         else
           echo "❌ ERROR: No super.img found"
+          echo "📁 Available files:"
+          find . -name "*.img" | head -20
           exit 1
         fi
         
