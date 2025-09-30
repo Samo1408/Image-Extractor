@@ -1,4 +1,4 @@
-name: Extract Samsung Partitions Enhanced 
+name: Extract Samsung Partitions with Enhanced
 
 on:
   workflow_dispatch:
@@ -94,8 +94,9 @@ jobs:
           p7zip-full \
           cpio \
           wget \
-          pigz \
-          pxz
+          pigz
+
+        echo "✅ Essential tools installed successfully"
 
     - name: Download extraction tools from your repository
       run: |
