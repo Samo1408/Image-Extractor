@@ -1,4 +1,4 @@
-name: Extract Samsung Partitions / Files Option
+name: Extract Samsung Partitions with / Files Option
 
 on:
   workflow_dispatch:
@@ -46,6 +46,16 @@ jobs:
       run: |
         echo "💾 Initial disk space:"
         df -h
+
+    - name: Setup cache disk
+      run: |
+        echo "🔄 Setting up cache disk..."
+        # إنشاء مجلد العمل على القرص المخبأ
+        sudo mkdir -p /mnt/cache
+        # توسعة القرص المخبأ إلى 40GB
+        sudo mount -o size=40G,nr_inodes=0,mode=1777 -t tmpfs tmpfs /mnt/cache
+        echo "✅ Cache disk setup completed (40GB)"
+        df -h /mnt/cache
 
     - name: Generate unique tag
       run: |
@@ -97,17 +107,21 @@ jobs:
         echo "📋 Installed tools:"
         ls -la /usr/local/bin/simg2img /usr/local/bin/sdat2img /usr/local/bin/img2raw /usr/local/bin/brotli
 
-    - name: Download and extract firmware
+    - name: Download and extract firmware to cache
       run: |
+        # الانتقال إلى القرص المخبأ
+        cd /mnt/cache
         mkdir -p firmware
         cd firmware
         curl -L -o firmware.zip "${{ github.event.inputs.zip_url }}"
-        echo "📦 Downloaded file"
+        echo "📦 Downloaded file to cache disk"
         ls -lh firmware.zip
+        echo "💾 Current disk space:"
+        df -h /mnt/cache
 
     - name: Extract ZIP and find files
       run: |
-        cd firmware
+        cd /mnt/cache/firmware
         unzip -o firmware.zip -d extracted_zip/
         rm -f firmware.zip
         
@@ -137,10 +151,13 @@ jobs:
           echo "✅ Found recovery file: $RECOVERY_FILE"
           echo "RECOVERY_FILE=$RECOVERY_FILE" >> $GITHUB_ENV
         fi
+        
+        echo "💾 Disk space after extraction:"
+        df -h /mnt/cache
 
     - name: Extract AP and prepare files based on mode
       run: |
-        cd firmware
+        cd /mnt/cache/firmware
         
         # استخراج AP.tar.md5
         tar -xf ap_file.tar.md5
@@ -148,11 +165,13 @@ jobs:
         
         echo "📁 Files in AP.tar.md5:"
         ls -la | head -20
+        echo "💾 Disk space after AP extraction:"
+        df -h /mnt/cache
 
     - name: Handle boot.img extraction mode
       if: env.EXTRACTION_MODE == 'boot'
       run: |
-        cd firmware
+        cd /mnt/cache/firmware
         
         # البحث عن boot.img
         BOOT_SOURCE=$(find . -name "boot.img.lz4" -o -name "boot.img" -o -name "boot.img.br" | head -1)
@@ -175,12 +194,12 @@ jobs:
         fi
         
         ls -lh boot.img
-        echo "BOOT_FINAL=boot.img" >> $GITHUB_ENV
+        echo "BOOT_FINAL=/mnt/cache/firmware/boot.img" >> $GITHUB_ENV
 
     - name: Handle recovery.img extraction mode
       if: env.EXTRACTION_MODE == 'recovery'
       run: |
-        cd firmware
+        cd /mnt/cache/firmware
         
         # البحث عن recovery.img
         RECOVERY_SOURCE=$(find . -name "recovery.img.lz4" -o -name "recovery.img" -o -name "recovery.img.br" | head -1)
@@ -203,12 +222,12 @@ jobs:
         fi
         
         ls -lh recovery.img
-        echo "RECOVERY_FINAL=recovery.img" >> $GITHUB_ENV
+        echo "RECOVERY_FINAL=/mnt/cache/firmware/recovery.img" >> $GITHUB_ENV
 
     - name: Handle partitions extraction mode
       if: env.EXTRACTION_MODE == 'partitions' || env.EXTRACTION_MODE == 'system_files'
       run: |
-        cd firmware
+        cd /mnt/cache/firmware
         
         # البحث عن super.img
         SUPER_FILE=$(find . -name "super.img.lz4" -o -name "super.img" -o -name "super.img.br" | head -1)
@@ -233,27 +252,34 @@ jobs:
         
         rm -f super_source.img
         
+        echo "💾 Disk space after super extraction:"
+        df -h /mnt/cache
+        
         # تحويل sparse إلى raw
         echo "🔄 Converting sparse image to raw..."
         simg2img super.img.sparse super.img.raw
         rm -f super.img.sparse
         echo "✅ super.img.raw ready"
         ls -lh super.img.raw
+        echo "💾 Disk space after super conversion:"
+        df -h /mnt/cache
 
     - name: Extract partitions from super.img
       if: env.EXTRACTION_MODE == 'partitions' || env.EXTRACTION_MODE == 'system_files'
       run: |
-        cd firmware
+        cd /mnt/cache/firmware
         mkdir -p partitions
         echo "🔧 Extracting partitions from super.img.raw..."
         python3 lpunpack.py super.img.raw partitions/
         echo "📂 Partitions extracted:"
         ls -la partitions/
+        echo "💾 Disk space after partition extraction:"
+        df -h /mnt/cache
 
     - name: Filter requested partitions
       if: env.EXTRACTION_MODE == 'partitions'
       run: |
-        cd firmware/partitions
+        cd /mnt/cache/firmware/partitions
         
         TARGET_PARTITIONS="${{ github.event.inputs.partitions_to_extract }}"
         echo "🔧 Filtering partitions. Keeping only: $TARGET_PARTITIONS"
@@ -271,7 +297,7 @@ jobs:
     - name: Extract system files from system partition
       if: env.EXTRACTION_MODE == 'system_files'
       run: |
-        cd firmware/partitions
+        cd /mnt/cache/firmware/partitions
         
         # التأكد من وجود system.img
         if [ ! -f "system.img" ]; then
@@ -339,11 +365,13 @@ jobs:
         done
         
         echo "📊 Total files extracted: $EXTRACTED_COUNT"
+        echo "💾 Disk space after system files extraction:"
+        df -h /mnt/cache
 
     - name: Verify extracted files
       if: env.EXTRACTION_MODE == 'system_files'
       run: |
-        cd firmware/partitions/extracted_files
+        cd /mnt/cache/firmware/partitions/extracted_files
         
         echo "📋 Verifying extracted files:"
         find . -type f | head -30 || echo "No files found"
@@ -366,7 +394,7 @@ jobs:
 
     - name: Compress files based on mode
       run: |
-        cd firmware
+        cd /mnt/cache/firmware
         mkdir -p output
         
         case "$EXTRACTION_MODE" in
@@ -374,14 +402,14 @@ jobs:
             echo "📦 Handling boot mode..."
             cp boot.img output/
             gzip output/boot.img
-            echo "BOOT_FINAL=output/boot.img.gz" >> $GITHUB_ENV
+            echo "BOOT_FINAL=/mnt/cache/firmware/output/boot.img.gz" >> $GITHUB_ENV
             ARTIFACT_NAME="boot"
             ;;
           "recovery")
             echo "📦 Handling recovery mode..."
             cp recovery.img output/
             gzip output/recovery.img
-            echo "RECOVERY_FINAL=output/recovery.img.gz" >> $GITHUB_ENV
+            echo "RECOVERY_FINAL=/mnt/cache/firmware/output/recovery.img.gz" >> $GITHUB_ENV
             ARTIFACT_NAME="recovery"
             ;;
           "partitions")
@@ -415,12 +443,14 @@ jobs:
         echo "ARTIFACT_NAME=$ARTIFACT_NAME" >> $GITHUB_ENV
         echo "📁 Output files:"
         ls -la output/
+        echo "💾 Final disk space:"
+        df -h /mnt/cache
 
     - name: Create final package
       run: |
-        cd firmware/output
+        cd /mnt/cache/firmware/output
         
-        FINAL_FILE="/tmp/$ARTIFACT_NAME-$FINAL_TAG.tar.gz"
+        FINAL_FILE="/mnt/cache/$ARTIFACT_NAME-$FINAL_TAG.tar.gz"
         
         if ls * 1> /dev/null 2>&1; then
           echo "📦 Creating final package: $FINAL_FILE"
@@ -489,12 +519,12 @@ jobs:
         path: ${{ env.FINAL_FILE }}
         retention-days: 7
 
-    - name: Cleanup
+    - name: Cleanup cache
       run: |
-        sudo rm -rf firmware
-        rm -f lpunpack.py
-        rm -f /tmp/*.tar.gz
-        echo "🧹 تم التنظيف"
+        echo "🧹 Cleaning up cache disk..."
+        sudo umount /mnt/cache 2>/dev/null || true
+        sudo rm -rf /mnt/cache/*
+        echo "✅ Cache cleanup completed"
 
     - name: Success message
       run: |
@@ -502,5 +532,6 @@ jobs:
         echo "🚀 النوع: $EXTRACTION_MODE"
         echo "📁 الملفات: $ARTIFACT_NAME"
         echo "🏷️ الوسم: $FINAL_TAG"
+        echo "💾 تم استخدام القرص المخبأ 40GB بنجاح"
         echo "📎 الرابط: https://github.com/$GITHUB_REPOSITORY/releases/tag/$FINAL_TAG"
         echo "🛠️ تم باستخدام أدوات Samo1408/Image-Extractor"
